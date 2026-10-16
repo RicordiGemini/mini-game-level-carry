@@ -11,7 +11,7 @@ import {
   rarityPowerMul, raritySockets, rarityAffixCount,
   ascendCopiesOf, ascendGoldOf, ascendNeedsCore,
   normalizeRarity, isMaxRarity, rarityHasInnate,
-} from '../.test-build/RarityConfig.js';
+} from '../.test-build/data/RarityConfig.js';
 import { createSuite } from './assert.mjs';
 
 const t = createSuite('validateRarityTable 硬校验测试');

@@ -4,16 +4,19 @@
  * 【为什么需要这一步】
  *   `battle/` 与 `core/` 的核心逻辑刻意不依赖 Cocos（当初"战斗层不认识属性表"
  *   这条架构约束带来的红利），所以它们可以在 Node 里直接跑断言。
- *   但配置表 import 了 `cc` —— 而 cc 只在运行时由引擎提供，Node 里没有。
+ *   但它们 import 了 `cc` —— 而 cc 只在运行时由引擎提供，Node 里没有。
  *   所以编译时把 `cc` 换成一份**最小可运行的桩**。
  *
- * 【桩里只提供什么】
- *   仅配置表实际用到的成员。真实引擎行为不需要模拟 ——
- *   被测的是校验逻辑，不是引擎。
+ * 【桩提供什么】
+ *   - UI 组件类：`Component` / `Node` / `Label` / …（够解析 import 即可）
+ *   - **`sys.localStorage`：内存实现**。这是让业务逻辑进Node 的关键 ——
+ *     `SaveManager` 的全部存储访问都走这一个出口（`sys.localStorage.getItem`
+ *     / `setItem` / `removeItem`），桩里实现它，整个存档与迁移链就能在 Node 跑。
+ *   真实引擎行为不需要模拟 —— 被测的是我们自己的逻辑，不是 Cocos。
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,8 +51,46 @@ export class UITransform {}
 export class Button {}
 export class Sprite {}
 export class Widget {}
+
+/**
+ * 内存版 localStorage —— 语义对齐浏览器 / 微信小游戏的 Storage。
+ *
+ * 【为什么要真的实现】
+ *   SaveManager 的全部持久化都走 sys.localStorage，
+ *   签名校验、键位迁移、坏档兜底这些逻辑只有在"真能存真能取"时才能测。
+ *   用空壳 Proxy 的话，getItem 永远返回 Proxy，测出来的东西毫无意义。
+ *
+ * 【语义细节（都与浏览器一致，改动时注意）】
+ *   - getItem 命中返回字符串，**未命中返回 null**（不是 undefined）
+ *   - 写入的值统一转字符串
+ *   - key 为 null 时不抛错，返回 undefined（浏览器行为）
+ *   - 提供 __clear() 供测试重置
+ */
+function createMemoryStorage() {
+  const map = new Map();
+  return {
+    getItem(k) {
+      const v = map.get(String(k));
+      return v === undefined ? null : v;
+    },
+    setItem(k, v) { map.set(String(k), String(v)); },
+    removeItem(k) { map.delete(String(k)); },
+    clear() { map.clear(); },
+    key(i) { return Array.from(map.keys())[i] ?? null; },
+    get length() { return map.size; },
+    __dump() { return Object.fromEntries(map); },
+  };
+}
+const storage = createMemoryStorage();
+
+export const sys = {
+  localStorage: storage,
+  platform: 'test',
+  os: 'test',
+  /** 供测试直接摸到底层存储（清档、塞坏数据） */
+  __storage: storage,
+};
 export const director = chain;
-export const sys = chain;
 export const game = chain;
 export const input = chain;
 export const screen = chain;
@@ -89,6 +130,8 @@ execFileSync(process.execPath, [
   '--experimentalDecorators',
   '--esModuleInterop',
   '--noEmitOnError', 'false',
+  // 与 tsc 共用同一份 cc 类型声明，避免"编译能过但类型检查报错"的不一致
+  join(root, 'types', 'cc-stub.d.ts'),
   join(scripts, 'data', 'FormConfig.ts'),
   join(scripts, 'data', 'EquipmentConfig.ts'),
   join(scripts, 'data', 'AuxConfig.ts'),
@@ -96,6 +139,11 @@ execFileSync(process.execPath, [
   join(scripts, 'data', 'RarityConfig.ts'),
   join(scripts, 'data', 'ElementConfig.ts'),
   join(scripts, 'data', 'TutorialConfig.ts'),
+  // ---- 业务逻辑（依赖 sys.localStorage，靠内存桩进 Node）----
+  join(scripts, 'core', 'HashUtil.ts'),
+  join(scripts, 'core', 'SaveManager.ts'),
+  join(scripts, 'core', 'TutorialManager.ts'),
+  join(scripts, 'core', 'AchievementManager.ts'),
 ], { cwd: root, stdio: 'inherit' });
 
 // ---------------- 把产物里的 'cc' 重定向到桩，并补 ESM 扩展名 ----------------
@@ -113,9 +161,11 @@ function patch(dir) {
     let changed = false;
 
     if (/from\s+['"]cc['"]/.test(src)) {
-      const rel = p.slice(outDir.length).replace(/\\/g, '/');
-      const depth = rel.split('/').length - 1;
-      const up = '../'.repeat(depth);
+      // 按**产物目录内的相对路径**算深度，不能用绝对路径切前缀 ——
+// 递归到子目录时切不准会少算一层，指向不存在的 cc-stub.mjs。
+      const rel = relative(outDir, p).replace(/\\/g, '/');   // 例 data/FormConfig.js
+      const depth = rel.split('/').length - 1;       // 目录层数（data/ → 1）
+      const up = depth === 0 ? './' : '../'.repeat(depth);
       src = src.replace(/from\s+['"]cc['"]/g, `from '${up}cc-stub.mjs'`);
       changed = true;
     }

@@ -18,7 +18,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { NEWBIE_STEPS, FIRST_TIME_TIPS, NEWBIE_KEY } from '../.test-build/TutorialConfig.js';
+import { NEWBIE_STEPS, FIRST_TIME_TIPS, NEWBIE_KEY } from '../.test-build/data/TutorialConfig.js';
 import { createSuite } from './assert.mjs';
 
 const t = createSuite('教学体系测试（触发点 ↔ 文案表双向一致）');

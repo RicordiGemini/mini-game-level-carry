@@ -17,8 +17,8 @@
 import {
   validateFormGraph, validateFormGraphData,
   ALL_FORMS, FUSION_RECIPES, WEAPON_ROOT_IDS,
-} from '../.test-build/FormConfig.js';
-import { AUX_ROOT_IDS } from '../.test-build/AuxConfig.js';
+} from '../.test-build/data/FormConfig.js';
+import { AUX_ROOT_IDS } from '../.test-build/data/AuxConfig.js';
 import { createSuite } from './assert.mjs';
 
 const t = createSuite('validateFormGraph 硬校验测试');

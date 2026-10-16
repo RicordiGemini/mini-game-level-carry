@@ -21,7 +21,7 @@ import {
   COUNTER_MUL, COUNTERED_MUL, ELEMENT_MUL_MAX,
   counterBreakOf, COUNTER_BREAK_MAX,
   BREAK_PER_LEVEL, BREAK_PER_RANK, BREAK_PER_SOCKET,
-} from '../.test-build/ElementConfig.js';
+} from '../.test-build/data/ElementConfig.js';
 import { createSuite } from './assert.mjs';
 
 const t = createSuite('24 属性编排测试');
