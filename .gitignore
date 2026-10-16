@@ -1,0 +1,17 @@
+# Cocos Creator 生成物（重新打开工程会自动重建）
+/temp/
+/library/
+/local/
+/build/
+/profiles/
+/native/
+
+# 依赖
+node_modules/
+
+# 编辑器 / 系统杂项
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
