@@ -155,21 +155,26 @@ assets/scripts/          20219 行 TypeScript
 
 本项目**设计文档完整度很高，但存在三类必须先解决的问题**：
 
-### 1. 没有运行时测试（P0）
+### 1. 测试覆盖仍很薄（P0）
 
-✅ 类型检查已通：本轮新增 `tsconfig.json` + `types/cc-stub.d.ts`，
-`npx tsc --noEmit` 现在可以跑，**全工程 0 错误**。
-（stub 的作用：Cocos 的类型定义在 gitignore 的 `temp/` 里，
-没有它则克隆下来的仓库无法做任何检查。）
+✅ **类型检查**：`npm run typecheck` → 全工程 0 错误
+（`tsconfig.json` + `types/cc-stub.d.ts`，因为 Cocos 的类型定义在 gitignore 的 `temp/` 里）
 
-❌ 但**运行时测试仍然全部缺失** —— `e2e.js` / `balance_guard.js` /
-`chain_probe.js` 等 14 个脚本、共 1159 项断言，交付物里一个都没有，
-历史文档的"全绿"结论无法复现。
+✅ **测试框架已跑通**：`npm test`
 
-好消息是 `battle/` 与 `core/` 的核心逻辑本来就是纯函数（当初
-"战斗层不认识属性表"这条架构约束的红利），搬进 Node 跑断言是可行的。
+```bash
+npm test        # 编译测试目标 + 跑全部套件
+npm run typecheck
+```
 
-最该先补的三套见 [docs/10-开发指南 §6.2](docs/10-开发指南.md)。
+第一套是 `validateFormGraph()` 的硬校验：**49 项断言**，
+并且用**变异测试验证过 23/23 条校验都能被抓到**（不是假绿）。
+
+❌ **其余 10 套历史测试仍不存在** —— `e2e.js` / `balance_guard.js` 等
+共 1159 项断言，交付物里一个都没有，历史文档的"全绿"结论无法复现。
+
+框架已就位，加新套件只要在 `tests/` 放 `*.test.mjs`，`npm test` 自动收编。
+下一批建议见 [docs/10-开发指南 §6.2](docs/10-开发指南.md)。
 
 ### 2. 三个功能性缺陷 —— ✅ 2026-10-16 已全部修复
 

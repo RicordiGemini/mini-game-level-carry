@@ -1,0 +1,14 @@
+{
+  "name": "mini-game-level-carry",
+  "version": "0.1.0",
+  "description": "武器收集 Roguelite 微信小游戏（Cocos Creator 3.8 + TypeScript）",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build:test": "node tools/build-tests.mjs",
+    "test": "npm run build:test && node tests/run.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

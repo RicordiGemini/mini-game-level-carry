@@ -765,11 +765,41 @@ export function formLabel(id: string): string {
  * 这些错误如果不在启动期发现，就会变成玩家侧的表现：
  * 三选一里点了一张卡却什么都没发生、合成之后形态不见了、图鉴里有个问号点不开。
  * 所以宁可让它在这里抛出来。
+ *
+ * 【2026-10-16 重构为可测试】
+ *   原实现直接读模块级的 `FORM_MAP` / `FUSION_RECIPES`，测试无法注入"坏配置"，
+ *   只能验证"当前配置是对的"—— 那样测不出校验逻辑本身有没有用。
+ *   现在拆成两层：
+ *     `validateFormGraphData(forms, recipes, weaponRoots, auxRoots)` 纯函数，接收数据
+ *     `validateFormGraph()` 保持原签名与行为，读全局数据后调它
+ *   生产代码行为完全不变，测试则可以拿各种畸形数据喂进去。
  */
 export function validateFormGraph(): string[] {
+    return validateFormGraphData(
+        ALL_FORMS, FUSION_RECIPES, WEAPON_ROOT_IDS, AUX_ROOT_IDS);
+}
+
+/**
+ * 校验形态图（纯函数版，见上方说明为什么拆出来）。
+ *
+ * @param forms       全部形态节点（含武器与辅助）
+ * @param recipes     合成配方
+ * @param weaponRoots 武器根形态 id 列表
+ * @param auxRoots    辅助根形态 id 列表
+ * @returns 错误描述数组，**空数组代表通过**
+ */
+export function validateFormGraphData(
+    forms: FormNode[],
+    recipes: FusionRecipe[],
+    weaponRoots: string[],
+    auxRoots: string[]
+): string[] {
     const errors: string[] = [];
 
-    for (const f of ALL_FORMS) {
+    /** id → 节点。刻意重建映射而不是复用模块级的 FORM_MAP，保证只校验传入的数据 */
+    const map: Record<string, FormNode> = {};
+    for (const f of forms) map[f.id] = f;
+    for (const f of forms) {
         if (f.sources.length === 0 && f.kind === 'weapon') {
             errors.push('武器形态缺少 sources：' + f.id);
         }
@@ -781,7 +811,7 @@ export function validateFormGraph(): string[] {
         }
 
         for (const e of f.evolveTo) {
-            const target = FORM_MAP[e.to];
+            const target = map[e.to];
             if (!target) {
                 errors.push('进化边指向不存在的形态：' + f.id + ' → ' + e.to);
                 continue;
@@ -813,7 +843,7 @@ export function validateFormGraph(): string[] {
             if (e.type === 'fusion') {
                 if (!e.need) {
                     errors.push('合成边缺少 need：' + f.id + ' → ' + e.to);
-                } else if (!FORM_MAP[e.need]) {
+                } else if (!map[e.need]) {
                     errors.push('合成边材料不存在：' + f.id + ' → ' + e.to + ' 需要 ' + e.need);
                 }
                 if (f.kind !== 'weapon') {
@@ -835,10 +865,10 @@ export function validateFormGraph(): string[] {
         }
     }
 
-    for (const r of FUSION_RECIPES) {
-        if (!FORM_MAP[r.a]) errors.push('合成配方材料 A 不存在：' + r.a);
-        if (!FORM_MAP[r.b]) errors.push('合成配方材料 B 不存在：' + r.b);
-        const t = FORM_MAP[r.to];
+    for (const r of recipes) {
+        if (!map[r.a]) errors.push('合成配方材料 A 不存在：' + r.a);
+        if (!map[r.b]) errors.push('合成配方材料 B 不存在：' + r.b);
+        const t = map[r.to];
         if (!t) {
             errors.push('合成产物不存在：' + r.to);
             continue;
@@ -850,8 +880,8 @@ export function validateFormGraph(): string[] {
         // 合成必须是"变强"：产物层级不低于材料，攻击加成高于二者。
         // 光靠边上的深度检查不够 —— 那样只保证不比 A 浅，
         // 会出现"合完之后比 B 还弱"的配置，玩家会觉得被坑了一格。
-        const fa = FORM_MAP[r.a];
-        const fb = FORM_MAP[r.b];
+        const fa = map[r.a];
+        const fb = map[r.b];
         if (fa && fb) {
             if (t.depth < Math.max(fa.depth, fb.depth)) {
                 errors.push('合成产物层级低于材料：' + r.to);
@@ -863,16 +893,16 @@ export function validateFormGraph(): string[] {
     }
 
     // 每把武器的根形态必须存在
-    for (const id of WEAPON_ROOT_IDS) {
-        const f = FORM_MAP[id];
+    for (const id of weaponRoots) {
+        const f = map[id];
         if (!f) {
             errors.push('武器根形态缺失：' + id);
             continue;
         }
         if (f.depth !== 0) errors.push('武器根形态 depth 必须为 0：' + id);
     }
-    for (const id of AUX_ROOT_IDS) {
-        const f = FORM_MAP[id];
+    for (const id of auxRoots) {
+        const f = map[id];
         if (!f) errors.push('辅助根形态缺失：' + id);
     }
 
