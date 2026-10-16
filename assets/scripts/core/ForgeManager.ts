@@ -70,7 +70,7 @@ import {
 } from '../data/RarityConfig';
 import { elementsForLevel } from '../data/ElementConfig';
 import { getEquipDef } from '../data/EquipmentConfig';
-import { EquipType, OwnedArmor, OwnedEquipment, PlayerProfile, ArmorWorn } from '../data/GameTypes';
+import { EquipType, OwnedArmor, OwnedEquipment, PlayerProfile, ArmorWorn, CombatModifier } from '../data/GameTypes';
 import { SaveManager } from './SaveManager';
 import { getDifficulty, normalizeTier } from '../data/DifficultyConfig';
 import { TRIPLE_COMPOSITE_ELEMENTS } from '../data/MaterialConfig';
@@ -772,6 +772,50 @@ export function armorBonus(): ElementBonus {
         if (!set) continue;
         const bonus = setBonusOf(set, avg, rarities.length);
         addBonus(out, scaleBonus(bonus, rarityPowerMul(avg)));
+    }
+    return out;
+}
+
+/**
+ * 把防具增益并进一份战斗修正。
+ *
+ * 【为什么必须在这里接，而不是只在 UI 上显示】
+ *   `armorBonus()` 一直只有 ForgePanel 一个调用方（纯展示），
+ *   战斗侧完全没接 —— 于是玩家在锻造面板能看到词条数值，
+ *   进了战斗却一点都不生效。这类"看得见用不上"的落差最容易招差评。
+ *
+ * 【字段映射】防具的 ElementBonus 与战斗修正 CombatModifier 同源，
+ *   前者多出的 `pierce` / `chain` 需要翻译成武器侧的字段：
+ *     pierce（贯穿上限 +1）→ 累加到 `extraShots` 之外的独立通道不存在，
+ *       所以只对**贯穿类**与**连锁类**有意义。这里采用保守做法：
+ *       统一折算成 extraShots（多发弹道）对任何攻击形态都生效，
+ *       且强度与原设计意图一致（"每多打一发"的期望收益）。
+ *   其余 13 个字段同名同义，直接相加。
+ *
+ * 【critMul 必须相加而不是取 max】
+ *   CombatModifier.critMul 的默认值是 2.0（空modifier），
+ *   而 ElementBonus.critMul 是**增量语义**（幽属性 +0.35 表示倍率 +35%）。
+ *   若沿用 addBonus 的 Math.max 逻辑，0.35 会被 2.0 吞掉 —— 这正是
+ *   天赋 t_critdmg 失效的同一个原因。此处按增量相加。
+ */
+export function mergeArmorBonus(mod: CombatModifier): CombatModifier {
+    const bonus = armorBonus();
+    const keys = Object.keys(bonus) as (keyof ElementBonus)[];
+    if (keys.length === 0) return mod;
+
+    const out: CombatModifier = { ...mod };
+    for (const k of keys) {
+        const v = bonus[k];
+        if (v === undefined || v === 0) continue;
+        const field = k as keyof CombatModifier;
+        // pierce：贯穿上限 +1。对贯穿类攻击等价于多穿一个目标，
+        // 但 CombatModifier 没有对应字段（战斗层从 WeaponSpec.pierce 读），
+        // 所以按"多打一发"的期望收益折算进 extraShots。
+        // chain：同理进 chainBonus（AttackFactory 从 WeaponSpec.chainBonus 读）。
+        const target: keyof CombatModifier =
+            k === 'pierce' ? 'extraShots' :
+                k === 'chain' ? 'chainBonus' : field;
+        out[target] = ((out[target] as number) || 0) + (v as number);
     }
     return out;
 }

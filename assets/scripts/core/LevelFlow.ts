@@ -59,7 +59,7 @@ import { ALL_FORMS } from '../data/FormConfig';
 import { affinityDamageMul, affinityNames } from '../data/LevelAffinity';
 import { auxSlotCap, weaponSlotCap } from '../data/RunConfig';
 import { EquipmentManager } from './EquipmentManager';
-import { grantDrops, rollDrops } from './ForgeManager';
+import { grantDrops, mergeArmorBonus, rollDrops } from './ForgeManager';
 import {
     ApplyResult, applyReward, createRunLoadout, gainExp, levelProgress,
 } from './RunLoadout';
@@ -683,14 +683,24 @@ export class LevelFlow {
      *
      * 单独抽成方法是为了保证三个调用点（战斗修正 / 战力快照 / 击杀经验）
      * 用的是同一份规则 —— 少一处注入就会出现"经验算升阶、伤害不算"的错位。
+     *
+     * ★ 防具增益在这里并入（原本漏接，导致防具词条/套装/镶嵌增益完全不生效）：
+     * 防具是**局外穿戴**的，不进 buildWeapons 的逐武器计算，
+     * 但它的单件 innate、套装 2/4 件属性、镶嵌属性石都是玩家侧的全局增益，
+     * 语义上与天赋、辅助装备完全同源，所以并进同一份 CombatModifier。
+     * 在这里并（而不是在 GameEntry 里另加参数）有三个好处：
+     *   1. 战斗伤害、战力面板、击杀经验三处自动一致，不会出现"面板有伤害没有"
+     *   2. 与每把武器自己的镶嵌相加时不会重复计算 —— 那是两条不同的来源
+     *   3. 护盾 / 荆棘 / 生命上限走同一条路，无需在 setup 里单独补
      */
     private modifierOf(loadout: RunLoadoutState): CombatModifier {
-        return aggregateModifier(
+        const mod = aggregateModifier(
             loadout,
             auxRankMulOf,
             (rootId) => auxRarityMulOf(rootId),
             (rootId) => auxInnateOf(rootId)
         );
+        return mergeArmorBonus(mod);
     }
 
     /** 本局当前的战斗修正（天赋 + 辅助装备 + 辅助升阶） */

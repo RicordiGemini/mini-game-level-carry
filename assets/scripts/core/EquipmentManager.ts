@@ -51,6 +51,7 @@ import {
     getUnlockedEquipIds,
     getUpgradeCost,
     isEquipUnlocked,
+    UPGRADE_MATERIAL_COST,
 } from '../data/EquipmentConfig';
 import { ATTACK_MODE_TEXT, formLevelOf, getForm, getRootForm } from '../data/FormConfig';
 import { EQUIP_SLOT_LIMIT, getEquipSlotCount } from '../data/DifficultyConfig';
@@ -173,23 +174,74 @@ export class EquipmentManager {
         return owned ? owned.level : 1;
     }
 
-    /** 升到下一级需要的金币，-1 表示已满级 */
+    /**
+     * 升到下一级需要的金币，-1 表示已满级。
+     * 保留这个只返回金币的接口是为了 UI 兼容 —— 完整花费（含材料）见 getUpgradeCostFull。
+     */
     static getUpgradeCost(equipId: string): number {
         const def = getEquipDef(equipId);
         if (!def) return -1;
         return getUpgradeCost(def, this.getLevel(equipId));
     }
 
+    /**
+     * 升级所需的**材料数量**（第八轮设计，2026-10-16 补上实现）。
+     *
+     * 【为什么要按目标等级分档】
+     *   升级是 1→5 四步，若每步都只要 1 个材料，那"材料线"就退化成
+     *   "打 4 局就满"，玩家感受不到它在推进。分档之后升到满级累计需
+     *   1+2+3+4 = **10 个**，与「打 10 局左右满级」的时间量级匹配 ——
+     *   恰好是当初设计时"推荐武器掉 2 个、克制武器掉 1 个"的产出速率能支撑的量。
+     *
+     *   代价刻意随等级加速上升，与金币曲线同向：
+     *   玩家每一级都要重新决定"是先攒金币还是先攒材料"。
+     */
+    static getUpgradeMaterialCost(equipId: string): number {
+        const def = getEquipDef(equipId);
+        if (!def) return -1;
+        const cur = this.getLevel(equipId);
+        if (cur >= def.levels.length) return -1;
+        return UPGRADE_MATERIAL_COST[cur - 1];
+    }
+
+    /** 升级所需的材料 id（`mat_<type>`），已满级返回 null */
+    static getUpgradeMaterialId(equipId: string): string | null {
+        const def = getEquipDef(equipId);
+        if (!def) return null;
+        if (this.getLevel(equipId) >= def.levels.length) return null;
+        return 'mat_' + def.type;
+    }
+
+    /** 升级的完整花费（金币 + 材料），供 UI 展示 */
+    static getUpgradeCostFull(equipId: string): { gold: number; materialId: string | null; material: number } | null {
+        const gold = this.getUpgradeCost(equipId);
+        if (gold < 0) return null;
+        return {
+            gold,
+            materialId: this.getUpgradeMaterialId(equipId),
+            material: this.getUpgradeMaterialCost(equipId),
+        };
+    }
+
     static canUpgrade(equipId: string): boolean {
         const cost = this.getUpgradeCost(equipId);
         if (cost < 0) return false;
-        return SaveManager.getProfile().gold >= cost;
+        const p = SaveManager.getProfile();
+        if (p.gold < cost) return false;
+        // 材料也要够 —— 否则按钮可点但点了必失败，是最典型的差评来源
+        const matId = this.getUpgradeMaterialId(equipId);
+        if (!matId) return false;
+        const need = this.getUpgradeMaterialCost(equipId);
+        return (p.materials && (p.materials[matId] || 0) >= need) || need <= 0;
     }
 
     /**
-     * 消耗永久金币升级武器。
+     * 消耗永久金币 + 该武器类型的突破材料升级。
      * 这是"局外加基础伤害"的实现点 —— 升级后所有用到这条武器线的形态
      * （含它的进化形态与合成产物）基础伤害都会变大。
+     *
+     * 【材料线2026-10-16 补上】此前只扣金币，导致 12 种 `mat_<type>` 被产出却
+     * 永远花不掉，"打推荐关 → 掉双份材料 → 升级那把武器"这条闭环不存在。
      */
     static upgrade(equipId: string): boolean {
         const def = getEquipDef(equipId);
@@ -203,7 +255,19 @@ export class EquipmentManager {
         const owned = p.equipment.find((e) => e.id === equipId);
         if (!owned) return false;
 
+        // 先校验材料，再统一扣费 —— 失败路径不扣任何资源
+        const matId = this.getUpgradeMaterialId(equipId);
+        const matNeed = this.getUpgradeMaterialCost(equipId);
+        if (matId && matNeed > 0) {
+            if (!p.materials) p.materials = {};
+            if ((p.materials[matId] || 0) < matNeed) return false;
+        }
+
         p.gold -= cost;
+        if (matId && matNeed > 0) {
+            p.materials[matId] = (p.materials[matId] || 0) - matNeed;
+            if (p.materials[matId] <= 0) delete p.materials[matId];
+        }
         owned.level += 1;
         SaveManager.saveProfile(p);
 

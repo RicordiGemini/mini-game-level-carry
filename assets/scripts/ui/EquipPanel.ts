@@ -38,6 +38,7 @@ import { _decorator, Component, Label, Node, instantiate, Prefab, Button } from 
 import { EquipmentManager, getMaxEquipped, isSlotMaxed } from '../core/EquipmentManager';
 import { SaveManager } from '../core/SaveManager';
 import { describeUnlock, getEquipDef, getLevelConf } from '../data/EquipmentConfig';
+import { getMaterialDef } from '../data/MaterialConfig';
 import {
     advancedTailOf, branchesOf, fusionsInvolving, mainLineOf,
 } from '../core/FormGraph';
@@ -57,13 +58,23 @@ export class EquipPanel extends Component {
     /** 出战槽位提示，如"出战 2/3 · 通关困难可解锁第 3 槽位" */
     @property(Label) slotLabel: Label = null!;
 
-    onLoad(): void {
-        this.closeBtn?.on(Node.EventType.TOUCH_END, this.hide, this);
-        this.node.active = false;
+onLoad(): void {
+    this.closeBtn?.on(Node.EventType.TOUCH_END, this.hide, this);
+    this.node.active = false;
     }
 
     onDestroy(): void {
-        this.closeBtn?.off(Node.EventType.TOUCH_END, this.hide, this);
+    this.closeBtn?.off(Node.EventType.TOUCH_END, this.hide, this);
+    }
+
+    /**
+     * 材料 id → 显示名。
+     * 找不到时退回 id 本身 —— 宁可显示一个内部标识，也不要让按钮文案变成空白，
+     * 空白文案会让玩家以为"这行不该存在"。
+     */
+    private materialNameOf(matId: string): string {
+    const def = getMaterialDef(matId);
+    return def ? def.name : matId;
     }
 
     public show(): void {
@@ -132,16 +143,32 @@ export class EquipPanel extends Component {
         if (upgradeBtn) {
             const cost = EquipmentManager.getUpgradeCost(owned.id);
             const isMax = cost < 0;
-            const affordable = !isMax && SaveManager.getProfile().gold >= cost;
+            const full = EquipmentManager.getUpgradeCostFull(owned.id);
+            const matHave = full && full.materialId
+                ? (SaveManager.getProfile().materials?.[full.materialId] || 0) : 0;
+            const matOk = !full || !full.materialId || matHave >= full.material;
+            const goldOk = SaveManager.getProfile().gold >= cost;
+            const affordable = !isMax && goldOk && matOk;
 
             upgradeBtn.interactable = affordable;
             if (costLabel) {
-                costLabel.string = isMax ? '已满级' : '升级 ' + cost;
+                // 材料是升级的第二种花费，必须显示出来 ——
+                // 按钮变灰却不说缺什么，是最典型的差评来源
+                if (isMax) {
+                    costLabel.string = '已满级';
+                } else if (full && full.materialId) {
+                    const matName = this.materialNameOf(full.materialId);
+                    costLabel.string = '升级 ' + cost + ' 金\n' +
+                        matName + ' ' + matHave + '/' + full.material;
+                } else {
+                    costLabel.string = '升级 ' + cost;
+                }
             }
             upgradeBtn.node.off(Node.EventType.TOUCH_END);
             upgradeBtn.node.on(Node.EventType.TOUCH_END, () => {
+                // 按钮已禁用时点不到；这里再判一次是防"点击瞬间资源被别处花掉"
                 if (EquipmentManager.upgrade(owned.id)) {
-                    this.rebuild();   // 升级成功后整表刷新（金币、伤害、消耗都变了）
+                    this.rebuild();   // 升级成功后整表刷新（金币、材料、伤害都变了）
                 }
             }, this);
         }

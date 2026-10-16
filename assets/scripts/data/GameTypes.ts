@@ -655,6 +655,16 @@ export interface CombatModifier {
     critRate: number;
     /** 暴击伤害倍率 */
     critMul: number;
+    /**
+     * 运行时记账：critMul 里"由绝对倍率决定的那一层"。
+     *
+     * 存在的唯一原因是 `addEffect` 遇到绝对倍率（辅助 2.2 / 2.3 / 2.8）时
+     * 不能直接对 `critMul` 取 max —— 那会把此前由增量（天赋 0.15 / 幽属性 0.35）
+     * 累加出来的那部分直接抹掉。有了这个字段就能把两层分开算。
+     *
+     * ⚠️ 可选字段，**不参与存档序列化与 UI 展示**，缺失时按基准 2.0 处理。
+     */
+    _critMulAbs?: number;
     /** 吸血比例 */
     lifesteal: number;
     /** 移速加成 */
@@ -679,16 +689,38 @@ export interface CombatModifier {
     highHpDmg: number;
 }
 
+/** 暴击伤害倍率的基准值：暴击默认打 2 倍伤害 */
+export const CRIT_MUL_BASE = 2.0;
+
 /** 一份空修正，作为累加的起点 */
 export function emptyModifier(): CombatModifier {
     return {
-        atkPct: 0, atkSpeedPct: 0, critRate: 0, critMul: 2.0, lifesteal: 0,
+        atkPct: 0, atkSpeedPct: 0, critRate: 0, critMul: CRIT_MUL_BASE, lifesteal: 0,
         moveSpeedPct: 0, maxHpFlat: 0, shield: 0, expPct: 0, thorns: 0,
         rangePct: 0, extraShots: 0, chainBonus: 0, pierceResist: 0, highHpDmg: 0,
     };
 }
 
-/** 把一个 AuxEffect 累加进 CombatModifier（critMul 取最大值而不是相加） */
+/**
+ * 把一个 AuxEffect 累加进 CombatModifier。
+ *
+ * 【critMul 的两种语义与处理（2026-10-16 修复）】
+ *   `critMul` 在这套工程里有**两种写法**，而它们的含义完全不同：
+ *     绝对值：辅助装备给 `critMul: 2.2` →「暴击伤害 2.2 倍」（鹰眼镜 2.2 / 灭世之瞳 2.8）
+ *     增量值：天赋给 `critMul: 0.15` →「暴击伤害 +0.15 倍」（破甲印记）
+ *             属性给 `critMul: 0.35` →「暴击伤害 +0.35 倍」（幽属性镶嵌）
+ *
+ *   原来的实现无条件取 `Math.max(mod.critMul, e.critMul)`，
+ *   于是增量语义的天赋与属性**全部被丢弃** ——
+ *   `Math.max(2.0, 0.15) = 2.0`，破甲印记与幽属性都是死条目。
+ *
+ *   现在按数值分档判定：
+ *     e.critMul >= 2 → 视为**绝对倍率**，取max（沿用原语义）
+ *     e.critMul <  2 → 视为**增量**，加到"当前值 - 基准 2.0"上
+ *   阈值取 2.0 是因为它是 `emptyModifier()` 的起点，也是
+ *   `BattleWorld` 里`Math.max(1.1, critMul || 2)` 的兜底值 ——
+ *   任何合法的暴击倍率都必须 ≥ 1.1，所以 2.0 是安全的分界。
+ */
 export function addEffect(mod: CombatModifier, e: AuxEffect | undefined, scale = 1): CombatModifier {
     if (!e) return mod;
     const add = (cur: number | undefined, delta: number | undefined): number =>
@@ -696,7 +728,26 @@ export function addEffect(mod: CombatModifier, e: AuxEffect | undefined, scale =
     mod.atkPct = add(mod.atkPct, e.atkPct);
     mod.atkSpeedPct = add(mod.atkSpeedPct, e.atkSpeedPct);
     mod.critRate = add(mod.critRate, e.critRate);
-    if (e.critMul !== undefined) mod.critMul = Math.max(mod.critMul, e.critMul);
+    if (e.critMul !== undefined) {
+        if (e.critMul < CRIT_MUL_BASE) {
+            // 增量语义（天赋 0.15 / 幽属性 0.35）：直接累加，满层也生效
+            mod.critMul = mod.critMul + e.critMul * scale;
+        } else {
+            // 绝对倍率语义（辅助装备 2.2 / 2.3 / 2.8）：只抬「基准层」，保留「增量层」
+            //
+            // 为什么必须拆成两层 —— 直接对当前值取 max 会出两种错：
+            //   ① Math.max(2.0 + 0.35, 2.5) = 2.5，绝对倍率把已累加的增量吃掉了，
+            //      于是"幽属性 + 破甲印记 + 灭世之瞳"三件同穿时前两件白穿；
+            //   ② 若改成累加，则两件 2.2 会变成 4.4，暴击倍率失控。
+            //
+            // _critMulAbs 记住"当前基准层是多少"，增量 = 当前值 - 基准层。
+            // 它是运行时记账字段，不参与任何 UI 展示与存档序列化。
+            const abs = mod._critMulAbs || CRIT_MUL_BASE;
+            const inc = mod.critMul - abs;
+            mod._critMulAbs = Math.max(abs, e.critMul * scale);
+            mod.critMul = mod._critMulAbs + inc;
+        }
+    }
     mod.lifesteal = add(mod.lifesteal, e.lifesteal);
     mod.moveSpeedPct = add(mod.moveSpeedPct, e.moveSpeedPct);
     mod.maxHpFlat = add(mod.maxHpFlat, e.maxHpFlat);
