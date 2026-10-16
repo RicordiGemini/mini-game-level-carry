@@ -14,6 +14,23 @@
 
 import { AttackModeId } from '../data/GameTypes';
 import {
+    CHAIN_BASE_JUMPS,
+    CHAIN_MAX_JUMPS,
+    FULL_RAIN_DAMAGE_MUL,
+    METEOR_MIN_RADIUS,
+    METEOR_RADIUS_RATIO,
+    MELEE_MIN_RADIUS,
+    MELEE_RADIUS_RATIO,
+    MELEE_REACH_RATIO,
+    METEOR_DAMAGE_MUL,
+    RAIN_DAMAGE_MUL,
+    SHOCKWAVE_GROW_RATIO,
+    SHOCKWAVE_R0_RATIO,
+    SWEEP_RADIUS_RATIO,
+    SWEEP_REACH_RATIO,
+    TRIPLE_SHOT_FALLOFF,
+} from '../data/BalanceGuard';
+import {
     AIMED_SHOT_TAIL,
     EnemyState,
     Projectile,
@@ -166,7 +183,7 @@ export function buildAttack(
  * 速度 0 —— 它不是飞出去的，而是"原地挥一下"。
  */
 function buildMelee(d: Vec2, w: WeaponSpec, p: Vec2): Projectile[] {
-    const reach = w.range * 0.55;
+    const reach = w.range * MELEE_REACH_RATIO;
     return [
         make('melee', {
             pos: vadd(p, vscale(d, reach)),
@@ -174,7 +191,7 @@ function buildMelee(d: Vec2, w: WeaponSpec, p: Vec2): Projectile[] {
             speed: 0,
             life: 0.13,
             damage: w.damage,
-            radius: Math.max(30, w.range * 0.5),
+            radius: Math.max(MELEE_MIN_RADIUS, w.range * MELEE_RADIUS_RATIO),
             pierce: -1, // 挥砍范围内的敌人全部命中
             attachDist: reach,
         }),
@@ -196,7 +213,7 @@ function buildMelee(d: Vec2, w: WeaponSpec, p: Vec2): Projectile[] {
 function buildBullet(d: Vec2, w: WeaponSpec, p: Vec2, count: number, scene: Scene): Projectile[] {
     const speed = 620;
     const spread = count > 1 ? (7 * Math.PI) / 180 : 0;
-    const dmg = count > 1 ? w.damage * 0.62 : w.damage;
+    const dmg = count > 1 ? w.damage * TRIPLE_SHOT_FALLOFF : w.damage;
     const travel = travelDist(w, scene, true);
     const out: Projectile[] = [];
 
@@ -220,7 +237,7 @@ function buildBullet(d: Vec2, w: WeaponSpec, p: Vec2, count: number, scene: Scen
 
 /** 范围剑气：往前推出去的一段宽判定，能扫到多个敌人 */
 function buildSweep(d: Vec2, w: WeaponSpec, p: Vec2): Projectile[] {
-    const reach = w.range * 0.5;
+    const reach = w.range * SWEEP_REACH_RATIO;
     return [
         make('sweep', {
             pos: vadd(p, vscale(d, reach)),
@@ -228,7 +245,7 @@ function buildSweep(d: Vec2, w: WeaponSpec, p: Vec2): Projectile[] {
             speed: 230,
             life: 0.30,
             damage: w.damage,
-            radius: w.range * 0.7,
+            radius: w.range * SWEEP_RADIUS_RATIO,
             pierce: -1,
             attachDist: reach,
         }),
@@ -259,7 +276,7 @@ function buildPierce(d: Vec2, w: WeaponSpec, p: Vec2, scene: Scene): Projectile[
 
 /** 震荡波：以玩家为中心向外扩散的圆环，自身不动、半径持续变大 */
 function buildShockwave(w: WeaponSpec, p: Vec2): Projectile[] {
-    const r0 = w.range * 0.35;
+    const r0 = w.range * SHOCKWAVE_R0_RATIO;
     return [
         make('shockwave', {
             pos: p,
@@ -267,7 +284,7 @@ function buildShockwave(w: WeaponSpec, p: Vec2): Projectile[] {
             life: 0.45,
             damage: w.damage,
             radius: r0,
-            growRate: w.range * 2.2,
+            growRate: w.range * SHOCKWAVE_GROW_RATIO,
             pierce: -1,
             attachDist: 0, // 跟着玩家，扩到哪算哪
         }),
@@ -288,7 +305,7 @@ function buildRain(w: WeaponSpec, alive: EnemyState[], rng: () => number): Proje
                 speed: 0,
                 life: 0.18,
                 delay: 0.32,
-                damage: Math.max(1, Math.round(w.damage * 0.85)),
+                damage: Math.max(1, Math.round(w.damage * RAIN_DAMAGE_MUL)),
                 radius: 58,
                 pierce: -1,
             })
@@ -306,7 +323,8 @@ function buildRain(w: WeaponSpec, alive: EnemyState[], rng: () => number): Proje
 function buildChain(d: Vec2, w: WeaponSpec, p: Vec2, scene: Scene): Projectile[] {
     const speed = 1500;
     const travel = travelDist(w, scene, true);
-    const chainLeft = Math.max(1, Math.min(8, 3 + Math.floor(w.chainBonus || 0)));
+    const chainLeft = Math.max(1,
+        Math.min(CHAIN_MAX_JUMPS, CHAIN_BASE_JUMPS + Math.floor(w.chainBonus || 0)));
     return [
         make('chain', {
             pos: vadd(p, vscale(d, 20)),
@@ -332,8 +350,8 @@ function buildMeteor(w: WeaponSpec, alive: EnemyState[], rng: () => number): Pro
             speed: 0,
             life: 0.20,
             delay: 0.42,
-            damage: Math.round(w.damage * 2.2),
-            radius: Math.max(90, w.range * 0.55),
+            damage: Math.round(w.damage * METEOR_DAMAGE_MUL),
+            radius: Math.max(METEOR_MIN_RADIUS, w.range * METEOR_RADIUS_RATIO),
             pierce: -1,
         }),
     ];
@@ -367,7 +385,7 @@ function buildFullScreen(w: WeaponSpec, scene: Scene, alive: EnemyState[], rng: 
                     speed: 0,
                     life: 0.18,
                     delay: 0.30,
-                    damage: Math.max(1, Math.round(w.damage * 0.7)),
+                    damage: Math.max(1, Math.round(w.damage * FULL_RAIN_DAMAGE_MUL)),
                     radius: 66,
                     pierce: -1,
                 })

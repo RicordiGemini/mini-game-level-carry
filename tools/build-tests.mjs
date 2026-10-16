@@ -139,6 +139,12 @@ execFileSync(process.execPath, [
   join(scripts, 'data', 'RarityConfig.ts'),
   join(scripts, 'data', 'ElementConfig.ts'),
   join(scripts, 'data', 'TutorialConfig.ts'),
+  join(scripts, 'data', 'LevelAffinity.ts'),
+  join(scripts, 'data', 'BalanceGuard.ts'),
+  join(scripts, 'battle', 'BattleTypes.ts'),
+  join(scripts, 'battle', 'AttackFactory.ts'),
+  join(scripts, 'battle', 'AimResolver.ts'),
+  join(scripts, 'battle', 'BattleWorld.ts'),
   // ---- 业务逻辑（依赖 sys.localStorage，靠内存桩进 Node）----
   join(scripts, 'core', 'HashUtil.ts'),
   join(scripts, 'core', 'SaveManager.ts'),

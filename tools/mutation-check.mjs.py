@@ -60,6 +60,27 @@ CASES = [
     # ---- TutorialConfig 文案约束（通过改文案制造违规）----
     ('TutorialConfig.ts', '标题长度<=12',
      None, None, 'tests/tutorial.test.mjs'),
+    ('BalanceGuard.ts', '预算过低',
+     "if (r.ratio < min) {", "if (false) {", 'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', '预算过高',
+     "if (r.ratio > max) {", "if (false) {", 'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', '中位数',
+     "if (med < medMin || med > medMax) {", "if (false) {", 'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', '同层不该互相压制',
+     "if (prevMax !== undefined && r.ratio < prevMax - 1e-9) {", "if (false) {",
+     'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', '预算完全相同',
+     "if (Math.abs(rows[i].ratio - rows[j].ratio) < 1e-9) {", "if (false) {",
+     'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', '模型/实测偏离',
+     "if (factor < tolMin || factor > tolMax) {", "if (false) {", 'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', '实测 DPS 为 0',
+     "if (actual <= 0) {", "if (false) {", 'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', 'pierce 同屏封顶',
+     "return Math.max(1, Math.min(raw, targets));", "return raw;", 'tests/balance.test.mjs'),
+    ('BalanceGuard.ts', '三连射衰减',
+     "export const TRIPLE_SHOT_FALLOFF = 0.62;",
+     "export const TRIPLE_SHOT_FALLOFF = 1.0;", 'tests/balance.test.mjs'),
 ]
 
 BUILD = ['node', 'tools/build-tests.mjs']
