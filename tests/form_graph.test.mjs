@@ -524,4 +524,8 @@ cfg.weaponRoots = ['blade', 'missing_root'];
 }
 
 /** 交给 tests/run.mjs 汇总；单独 `node tests/form_graph.test.mjs` 也能跑 */
-export const result = t.report();
+const result = t.report();
+// ⚠️ 必须设置 exitCode：否则 CI 里即使有断言失败，命令也会返回 0，
+// 变异测试之类的外部检查会误判为"测试通过"。这个坑踩过一次。
+if (result.failed > 0) process.exitCode = 1;
+export { result };

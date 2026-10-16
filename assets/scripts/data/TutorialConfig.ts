@@ -89,7 +89,7 @@ export const FIRST_TIME_TIPS: Record<string, TutorialTip> = {
             '装备越好的「破防」越高，越能无视克制关系。',
     },
     tip_reward: {
-        title: '三选一 · 变强的主要来源',
+        title: '三选一',
         body:
             '升级后会弹出三选一：拿新武器 / 让武器进化 / 合成武器 / 拿辅助装备 / 点天赋。\n' +
             '合成会占用一个武器槽，但立刻可以再补选一件，不亏。',

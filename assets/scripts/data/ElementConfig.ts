@@ -529,6 +529,141 @@ export function elementGroupOfLevel(levelId: number): string {
     return ELEMENT_GROUPS[g].name;
 }
 
+/**
+ * 校验属性编排表自身的一致性（2026-10-16 新增）。
+ *
+ * 【为什么要有这个函数】
+ *   历史文档声称 `forge_e2e.js` 里有「四条属性编排不变式」的断言，
+ *   但那个文件不存在 —— 于是这四条不变式此前**完全没有代码在守**，
+ *   改坏 `ELEMENT_GROUPS` 或 `LEVELS_PER_GROUP` 不会有任何报警。
+ *
+ * 【为什么是纯函数】
+ *   与 `validateFormGraphData` / `validateRarityTableData` 同一个理由：
+ *   测试需要能注入畸形数据，否则只能验「当前配置是对的」。
+ *
+ * @param groups    属性组表
+ * @param allIds    全量属性 id（用于校验覆盖率与重复）
+ * @param perGroup  每组覆盖几关（必须与种类边界对齐，见 LEVELS_PER_GROUP 的注释）
+ * @param countFor  某一关有几种属性
+ */
+export function validateElementGroups(
+    groups: Array<{ name: string; els: ElementId[] }>,
+    allIds: ElementId[],
+    perGroup: number,
+    countFor: (levelId: number) => number
+): string[] {
+    const errors: string[] = [];
+
+    // 1. 每组恰好 perGroup 种
+    for (const g of groups) {
+        if (g.els.length !== perGroup) {
+            errors.push('属性组「' + g.name + '」应为 ' + perGroup + ' 种，实际 ' + g.els.length);
+        }
+    }
+
+    // 2. 组内不重复
+    for (const g of groups) {
+        if (new Set(g.els).size !== g.els.length) {
+            errors.push('属性组「' + g.name + '」内部有重复：' + g.els.join(','));
+        }
+    }
+
+    // 3. 全部属性恰好被覆盖一次（不多不少）
+    const flat: ElementId[] = [];
+    for (const g of groups) flat.push(...g.els);
+    const flatSet = new Set(flat);
+    if (flatSet.size !== flat.length) {
+        errors.push('属性在各组间重复出现');
+    }
+    for (const id of allIds) {
+        if (!flatSet.has(id)) errors.push('属性未出现在任何组里：' + id);
+    }
+    for (const id of flat) {
+        if (allIds.indexOf(id) < 0) errors.push('组里出现了未知属性：' + id);
+    }
+
+    // 4. 组周期与种类边界必须对齐。
+    // 关键：「种类增加」必须发生在**换组的那一关**，而不是组内部 ——
+    // 历史上取 LEVELS_PER_GROUP=3 时正是这里破的窗：
+    // 种类从1 涨到 2 发生在组内（lv5），窗口又长又移，一个属性都留不下。
+    const span = groups.length * perGroup;
+    for (let lv = 1; lv <= span; lv++) {
+        const g = Math.floor((lv - 1) / perGroup) % groups.length;
+        const n = countFor(lv);
+        if (n > groups[g].els.length) {
+            errors.push('第 ' + lv + ' 关要 ' + n + ' 种属性，但所在组只有 ' +
+                groups[g].els.length + ' 种');
+        }
+        // 组内种类必须恒定 —— 这是「同组相邻两关共享 ≥1 种」成立的前提
+        const nThis = countFor(lv);
+        const nLast = countFor(perGroup * g + perGroup);
+        if (nThis !== nLast) {
+            errors.push('第 ' + lv + ' 关组内属性种类发生变化（' + nLast +
+                ' → ' + nThis + '），会破坏同组相邻两关共享 1 种的不变式');
+        }
+    }
+
+    return errors;
+}
+
+/**
+ * 校验关卡属性编排的四条不变式（纯函数版）。
+ *
+ * 这四条是玩家实际能感知的规则，配置改错会直接被看见：
+ *   1. 同一关内属性互不重复
+ *   2. 双属性以上，同组内相邻两关必然共享 ≥1 种
+ *   3. 单属性关之间不重叠（长度就是 1，本来就不可能；刻意如此，
+ *      让玩家一关只记一种属性，正好把克制环一个个教完）
+ *   4. 换组的那一关属性完全不同 —— 主题切换，是刻意的
+ */
+export function validateElementInvariants(
+    groups: Array<{ name: string; els: ElementId[] }>,
+    perGroup: number,
+    elementsOf: (levelId: number) => ElementId[],
+    countFor: (levelId: number) => number
+): string[] {
+    const errors: string[] = [];
+    const span = groups.length * perGroup;
+
+    for (let lv = 1; lv <= span; lv++) {
+        const els = elementsOf(lv);
+        const n = countFor(lv);
+
+        // 规则 1
+        if (new Set(els).size !== els.length) {
+            errors.push('第 ' + lv + ' 关属性重复：' + els.join(','));
+        }
+        // 实际取到的种类必须与声明一致（否则 UI 会显示错误的数量）
+        if (els.length !== n) {
+            errors.push('第 ' + lv + ' 关应有 ' + n + ' 种，实际 ' + els.length);
+        }
+    }
+
+    for (let lv = 2; lv <= span; lv++) {
+        const prev = elementsOf(lv - 1);
+        const cur = elementsOf(lv);
+        const sameGroup =
+            Math.floor((lv - 1) / perGroup) === Math.floor((lv - 2) / perGroup);
+        const n = countFor(lv);
+        const shared = cur.filter((e) => prev.indexOf(e) >= 0);
+
+        if (sameGroup) {
+     // 规则 2
+            if (n >= 2 && shared.length === 0) {
+        errors.push('第 ' + lv + ' 关与上一关同组但没有任何共享属性：' +
+       cur.join(',') + ' vs ' + prev.join(','));
+            }
+        } else {
+        // 规则 4
+    if (shared.length > 0) {
+    errors.push('第 ' + lv + ' 关换了组却仍与上一关共享：' + shared.join(','));
+    }
+        }
+    }
+
+    return errors;
+}
+
 /** 该关敌人的属性名串 */
 export function levelElementText(levelId: number): string {
     return elementsForLevel(levelId).map(elementName).join(' · ');

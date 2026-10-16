@@ -93,6 +93,9 @@ execFileSync(process.execPath, [
   join(scripts, 'data', 'EquipmentConfig.ts'),
   join(scripts, 'data', 'AuxConfig.ts'),
   join(scripts, 'data', 'GameTypes.ts'),
+  join(scripts, 'data', 'RarityConfig.ts'),
+  join(scripts, 'data', 'ElementConfig.ts'),
+  join(scripts, 'data', 'TutorialConfig.ts'),
 ], { cwd: root, stdio: 'inherit' });
 
 // ---------------- 把产物里的 'cc' 重定向到桩，并补 ESM 扩展名 ----------------

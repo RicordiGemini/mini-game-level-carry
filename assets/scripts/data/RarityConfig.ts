@@ -227,30 +227,49 @@ export function describeAscend(rarity: number): string {
         ' → ×' + next.powerMul.toFixed(2);
 }
 
-/** 校验品阶表自身的一致性（配置改错时立刻报错） */
+/**
+ * 校验品阶表自身的一致性（配置改错时立刻报错）。
+ *
+ * 【2026-10-16 重构为可测试】与 `validateFormGraphData` 同样的理由：
+ * 原实现硬读模块级 `RARITY_TABLE`，测试无法注入畸形数据，
+ * 只能验「当前表是对的」—— 那样测不出校验逻辑本身有没有用。
+ */
 export function validateRarityTable(): string[] {
+    return validateRarityTableData(RARITY_TABLE, RARITY_COUNT, GACHA_MAX_RARITY);
+}
+
+/**
+ * 校验品阶表（纯函数版）。
+ *
+ * @param table    品阶表
+ * @param count    期望的品阶总数
+ * @param gachaMax 抽奖能抽到的最高品阶（必须小于最高品阶，否则传说没有存在意义）
+ */
+export function validateRarityTableData(
+    table: RarityDef[], count: number, gachaMax: number
+): string[] {
     const errors: string[] = [];
-    if (RARITY_TABLE.length !== RARITY_COUNT) {
-        errors.push('品阶表长度应为 ' + RARITY_COUNT + '，实际 ' + RARITY_TABLE.length);
+    if (table.length !== count) {
+        errors.push('品阶表长度应为 ' + count + '，实际 ' + table.length);
     }
-    for (let i = 0; i < RARITY_TABLE.length; i++) {
-        const d = RARITY_TABLE[i];
+    for (let i = 0; i < table.length; i++) {
+        const d = table[i];
         if (d.tier !== i) errors.push('品阶表索引不连续：' + i + ' → ' + d.tier);
         if (d.powerMul <= 0) errors.push('品阶倍率必须为正：' + d.id);
         if (d.sockets < 0) errors.push('镶嵌槽位不能为负：' + d.id);
-        // 倍率必须严格递增，否则"升阶变强"这件事不成立
-        if (i > 0 && d.powerMul <= RARITY_TABLE[i - 1].powerMul) {
-            errors.push('品阶倍率必须严格递增：' + RARITY_TABLE[i - 1].id + ' → ' + d.id);
+        // 倍率必须严格递增，否则「升阶变强」这件事不成立
+        if (i > 0 && d.powerMul <= table[i - 1].powerMul) {
+            errors.push('品阶倍率必须严格递增：' + table[i - 1].id + ' → ' + d.id);
         }
         // 槽位不允许回退，否则升阶会镶不上原来的石头
-        if (i > 0 && d.sockets < RARITY_TABLE[i - 1].sockets) {
-            errors.push('镶嵌槽位不允许减少：' + RARITY_TABLE[i - 1].id + ' → ' + d.id);
+        if (i > 0 && d.sockets < table[i - 1].sockets) {
+            errors.push('镶嵌槽位不允许减少：' + table[i - 1].id + ' → ' + d.id);
         }
         if (d.innate && d.tier < INNATE_RARITY_MIN) {
             errors.push('低于钻石不该有自带属性：' + d.id);
         }
     }
-    if (GACHA_MAX_RARITY >= RARITY_COUNT - 1) {
+    if (gachaMax >= count - 1) {
         errors.push('抽奖上限不能是最高品阶（传说必须留作进化目标）');
     }
     return errors;
