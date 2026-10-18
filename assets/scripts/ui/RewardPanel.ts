@@ -51,6 +51,7 @@ const RARITY_TEXT = ['普通', '稀有', '史诗', '传说'];
 /** 卡片左侧的类别色条 / 标题前缀，让玩家一眼分清三类成长资源 */
 const KIND_TAG: Record<string, string> = {
     weapon_new: '新武器',
+    weapon_upgrade: '武器强化',
     weapon_evolve: '武器进化',
     weapon_fusion: '武器合成',
     aux_new: '新辅助',
@@ -73,12 +74,22 @@ export class RewardPanel extends Component {
         for (let i = 0; i < this.cards.length; i++) {
             this.cards[i]?.on(Node.EventType.TOUCH_END, () => this.onCardClicked(i), this);
         }
-        this.node.active = false;
+        const payload = LevelFlow.inst.phase === 'REWARD' ? LevelFlow.inst.getRewardPayload() : null;
+        if (payload) this.show(payload);
+        else this.node.active = false;
     }
 
     onDestroy(): void {
         for (let i = 0; i < this.cards.length; i++) {
             this.cards[i]?.off(Node.EventType.TOUCH_END, () => this.onCardClicked(i), this);
+        }
+    }
+
+    onEnable(): void {
+        // 组件首次启用可能晚于续玩事件，直接从流程状态恢复面板。
+        if (LevelFlow.inst.phase === 'REWARD') {
+            const payload = LevelFlow.inst.getRewardPayload();
+            if (payload) this.show(payload);
         }
     }
 
@@ -162,9 +173,15 @@ export class RewardPanel extends Component {
         // 卡片按钮禁用，避免连点两次把同一张卡结算两遍
         const btn = this.cards[index]?.getComponent(Button);
         if (btn) btn.interactable = false;
-        LevelFlow.inst.chooseReward(index);
+        const result = LevelFlow.inst.chooseReward(index);
+        if (!result?.ok) {
+            this._busy = false;
+            if (btn) btn.interactable = true;
+        }
         // 阶段由 LevelFlow 决定：可能再开一次（合成补选），也可能回到 PLAYING。
-        // 这里不主动隐藏面板 —— 下一次 show() 会覆盖它，回到 PLAYING 时由 GameEntry 关掉。
+        // 选择回调是同步执行的，因此这里立即跟随阶段更新显隐，避免等到
+        // 下一帧 GameEntry.update 才关闭面板；合成补选仍会保持面板显示。
+        this.node.active = LevelFlow.inst.phase === 'REWARD';
     }
 
     /** 供外部（GameEntry 的兜底逻辑）判断当前是否正在等玩家选择 */

@@ -40,8 +40,8 @@ import { AUX_ROOT_IDS } from '../data/AuxConfig';
 import { getEquipDef, EQUIP_TYPE_TEXT } from '../data/EquipmentConfig';
 import { AuxEffect } from '../data/GameTypes';
 import { TALENT_TABLE, talentSubtitle } from '../data/TalentConfig';
-import { FOCUS_TAKE, REWARD_CHOICES, RewardFocus, rewardFocusFor } from '../data/RunConfig';
-import { findFusions, readyEvolutions, resolveFormId } from './FormGraph';
+import { FOCUS_TAKE, REWARD_CHOICES, RewardFocus, rewardFocusFor, WEAPON_UPGRADES_REQUIRED, WEAPON_UPGRADE_ATK_PCT } from '../data/RunConfig';
+import { findFusions, readyEvolutions, resolveFormId, weaponUpgradeCount, weaponEvolutionHint, evolutionAuxIds } from './FormGraph';
 
 /** 生成候选所需的全部输入 */
 export interface RewardContext {
@@ -148,6 +148,18 @@ function weaponPool(ctx: RewardContext): Ranked[] {
     const out: Ranked[] = [];
     const lo = ctx.loadout;
 
+    for (let i = 0; i < lo.weapons.length; i++) {
+        const st = lo.weapons[i], form = getForm(resolveFormId(st));
+        const count = weaponUpgradeCount(st);
+        if (!form || count >= WEAPON_UPGRADES_REQUIRED) continue;
+        out.push({ priority: .5, opt: {
+            kind: 'weapon_upgrade', key: 'wup:' + i + ':' + count, title: form.name + ' · 强化',
+            subtitle: '强化 ' + count + ' → ' + (count + 1) + '/' + WEAPON_UPGRADES_REQUIRED,
+            desc: '攻击加成 +' + Math.round(WEAPON_UPGRADE_ATK_PCT * 100) + '%。' + weaponEvolutionHint(st),
+            rarity: 0, formId: form.id, slotIndex: i,
+        } });
+    }
+
     // --- 合成：优先级最高 ---
     for (const m of findFusions(lo, ctx.allowAdvanced)) {
         const target = getForm(m.recipe.to);
@@ -186,7 +198,7 @@ function weaponPool(ctx: RewardContext): Ranked[] {
                 key: 'wevo:' + m.slotIndex + ':' + m.edge.to,
                 title: target.name,
                 subtitle: (m.edge.advanced ? '高级进化 · ' : '进化 · ') + (from ? from.name : ''),
-                desc: m.edge.desc,
+                desc: m.edge.desc + '。' + weaponEvolutionHint(lo.weapons[m.slotIndex]),
                 rarity: depthRarity(target.depth),
                 formId: target.id,
                 slotIndex: m.slotIndex,
@@ -233,7 +245,7 @@ function weaponPool(ctx: RewardContext): Ranked[] {
                     key: 'wnew:' + id,
                     title: def.name,
                     subtitle: '新武器 · ' + (EQUIP_TYPE_TEXT[def.type] || '') + ' · 占 1 个武器槽',
-                    desc: def.desc,
+                    desc: def.desc + '。' + weaponEvolutionHint({ id, formId: id, kind: 'weapon', stage: 0, exp: 0 }),
                     rarity: 0,
                     formId: id,
                     slotIndex: -1,
@@ -248,6 +260,8 @@ function weaponPool(ctx: RewardContext): Ranked[] {
 function auxPool(ctx: RewardContext): Ranked[] {
     const out: Ranked[] = [];
     const lo = ctx.loadout;
+    const needed = new Set<string>();
+    for (const w of lo.weapons) for (const id of evolutionAuxIds(w)) needed.add(id);
 
     for (const m of readyEvolutions(lo, ctx.allowAdvanced)) {
         if (m.kind !== 'aux') continue;
@@ -275,13 +289,14 @@ function auxPool(ctx: RewardContext): Ranked[] {
             const root = getForm(id);
             if (!root) continue;
             out.push({
-                priority: 1,
+                priority: needed.has(id) ? -.5 : 1,
                 opt: {
                     kind: 'aux_new',
                     key: 'anew:' + id,
                     title: root.name,
                     subtitle: '新辅助 · 占 1 个辅助槽',
-                    desc: root.desc + (root.effect ? '（' + describeEffect(root.effect) + '）' : ''),
+                    desc: root.desc + (root.effect ? '（' + describeEffect(root.effect) + '）' : '') +
+                        (needed.has(id) ? ' · 可配合当前武器进化，武器需先强化五次，辅助不消耗' : ''),
                     rarity: 0,
                     formId: id,
                     slotIndex: -1,
@@ -353,6 +368,9 @@ function pickMixed(ctx: RewardContext, need: number): RewardOption[] {
     const order: RewardFocus[] = [focus];
     for (const k of ['weapon', 'talent', 'aux'] as RewardFocus[]) {
         if (k !== focus) order.push(k);
+    }
+    if (focus === 'weapon' && ctx.loadout.weapons.some(w => evolutionAuxIds(w).some(id => !hasAuxRoot(ctx.loadout, id)))) {
+        order.splice(1, order.length - 1, 'aux', 'talent');
     }
 
     const picked: RewardOption[] = [];

@@ -35,7 +35,7 @@ const chain = new Proxy(function () {}, {
 });
 export const _decorator = {
   ccclass: () => (cls) => cls,
-  property: () => () => noop,
+  property: () => () => undefined,
   executeInEditMode: () => noop,
   requireComponent: () => () => noop,
   disallowMultiple: () => noop,
@@ -51,6 +51,11 @@ export class UITransform {}
 export class Button {}
 export class Sprite {}
 export class Widget {}
+export class Tween { static stopAllByTarget() {} }
+export class EventTouch {}
+export const Layers = { Enum: { UI_2D: 1 } };
+export const HorizontalTextAlignment = {};
+export const VerticalTextAlignment = {};
 
 /**
  * 内存版 localStorage —— 语义对齐浏览器 / 微信小游戏的 Storage。
@@ -150,6 +155,8 @@ execFileSync(process.execPath, [
   join(scripts, 'core', 'SaveManager.ts'),
   join(scripts, 'core', 'TutorialManager.ts'),
   join(scripts, 'core', 'AchievementManager.ts'),
+  join(scripts, 'core', 'LevelFlow.ts'),
+  join(scripts, 'GameEntry.ts'),
 ], { cwd: root, stdio: 'inherit' });
 
 // ---------------- 把产物里的 'cc' 重定向到桩，并补 ESM 扩展名 ----------------

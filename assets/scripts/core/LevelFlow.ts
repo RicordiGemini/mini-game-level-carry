@@ -57,11 +57,11 @@ import { buildLoadout, describeLoadout, getLevelConfig, hasNextLevel } from '../
 import { getDifficulty, hasNextTier, normalizeTier } from '../data/DifficultyConfig';
 import { ALL_FORMS } from '../data/FormConfig';
 import { affinityDamageMul, affinityNames } from '../data/LevelAffinity';
-import { auxSlotCap, weaponSlotCap } from '../data/RunConfig';
+import { auxSlotCap, weaponSlotCap, experienceShare, CONTINUOUS_FORM_EXP } from '../data/RunConfig';
 import { EquipmentManager } from './EquipmentManager';
 import { grantDrops, mergeArmorBonus, rollDrops } from './ForgeManager';
 import {
-    ApplyResult, applyReward, createRunLoadout, gainExp, levelProgress,
+    ApplyResult, applyReward, createRunLoadout, gainExp, levelProgress, migrateExpCurve, migrateWeaponUpgrades,
 } from './RunLoadout';
 import {
     allFormIdsOf, aggregateModifier, maxDepthOf, weaponRootsOf,
@@ -81,7 +81,7 @@ import { makeRng } from '../battle/BattleTypes';
 
 export type LevelPhase =
     | 'SELECT' | 'DIFFICULTY' | 'LOADOUT' | 'REPLAY_BOOST'
-    | 'PLAYING' | 'REWARD' | 'SETTLE';
+    | 'PLAYING' | 'REWARD' | 'DEFEAT' | 'SETTLE';
 
 /** 继承来源 */
 export type CarrySource = 'none' | 'archive' | 'lowerTier';
@@ -192,12 +192,28 @@ export interface SettlePayload {
     canBatchPull: boolean;
 }
 
+/** 战败面板需要的数据；本局临时收益尚未进入永久档案。 */
+export interface DefeatPayload {
+    levelId: number;
+    difficulty: number;
+    difficultyName: string;
+    score: number;
+    elapsed: number;
+    kills: number;
+    level: number;
+    progress: number;
+    coin: number;
+    evolutionCount: number;
+    equipmentText: string;
+}
+
 type StartListener = (s: LevelState, cfg: LevelConfigItem) => void;
 type LoadoutListener = (p: LoadoutPayload) => void;
 type DifficultyListener = (p: DifficultyPayload) => void;
 type ReplayBoostListener = (p: ReplayBoostPayload) => void;
 type RewardListener = (p: RewardPayload) => void;
 type SettleListener = (p: SettlePayload) => void;
+type DefeatListener = (p: DefeatPayload) => void;
 type EvolveListener = (events: EvolutionEvent[]) => void;
 
 /** 广告看完后允许重选的最大次数，防止无限刷广告请求 */
@@ -250,16 +266,16 @@ export class LevelFlow {
     private _elementDamage = 0;
     /** 本局被属性抗性减免的伤害（成就 elementResist 的进度） */
     private _resistReduced = 0;
-    /** 三选一的随机序列，保证同一局的多次三选一不重复 */
-    private _rewardSeq = 0;
-
+    private _loadoutDirty = false;
     private _startCbs: StartListener[] = [];
     private _loadoutCbs: LoadoutListener[] = [];
     private _difficultyCbs: DifficultyListener[] = [];
     private _boostCbs: ReplayBoostListener[] = [];
     private _rewardCbs: RewardListener[] = [];
     private _settleCbs: SettleListener[] = [];
+    private _defeatCbs: DefeatListener[] = [];
     private _evolveCbs: EvolveListener[] = [];
+    private _loadoutChangedCbs: (() => void)[] = [];
 
     get phase(): LevelPhase { return this._phase; }
     get current(): LevelState | null { return this._state; }
@@ -271,7 +287,9 @@ export class LevelFlow {
     get globalMaxTier(): number { return SaveManager.getGlobalMaxTier(); }
     get dropArchiveOnRestart(): boolean { return DROP_ARCHIVE_ON_RESTART; }
     /** 战斗中是否需要暂停（三选一 / 复玩面板打开时） */
-    get paused(): boolean { return this._phase === 'REWARD' || this._phase === 'REPLAY_BOOST'; }
+    get paused(): boolean {
+        return this._phase === 'REWARD' || this._phase === 'REPLAY_BOOST' || this._phase === 'DEFEAT';
+    }
     /** 本局是否携带老档 —— 决定高级进化是否出现 */
     get allowAdvanced(): boolean {
         return !!this._state && this._state.carrySource !== 'none';
@@ -283,6 +301,9 @@ export class LevelFlow {
     onReplayBoost(cb: ReplayBoostListener): void { this._boostCbs.push(cb); }
     onReward(cb: RewardListener): void { this._rewardCbs.push(cb); }
     onSettle(cb: SettleListener): void { this._settleCbs.push(cb); }
+    onDefeat(cb: DefeatListener): void { this._defeatCbs.push(cb); }
+    /** 击杀成长和所有成功选卡后，同步完整战斗属性。 */
+    onLoadoutChanged(cb: () => void): void { this._loadoutChangedCbs.push(cb); }
     /** 订阅装备进化事件，UI 用来播特效/飘字 */
     onEvolve(cb: EvolveListener): void { this._evolveCbs.push(cb); }
 
@@ -300,9 +321,34 @@ export class LevelFlow {
         if (saved && !saved.cleared) {
             saved.difficulty = normalizeTier(saved.difficulty || 1);
             if (!saved.carrySource) saved.carrySource = saved.carried ? 'archive' : 'none';
+            // 旧档没有独立奖励去重表时，当前战场已结算的敌人必然已经发过奖励。
+            // 复制而不是复用数组，避免后续重试清空战场表时误删历史奖励记录。
+            if (!saved.rewardedEnemyIds) saved.rewardedEnemyIds = [...(saved.killedEnemyIds || [])];
+            if (saved.kills <= 0) {
+                saved.loadout.level = 1;
+                saved.loadout.pendingExp = 0;
+                saved.loadout.pendingPicks = 0;
+                saved.loadout.pending = [];
+                saved.loadout.pendingLevelUps = [];
+                SaveManager.saveLevel(saved);
+            }
+            // 旧档只有当前卡片，没有升级队列；只补回已有面板对应的一次机会。
+            if (!saved.loadout.pendingLevelUps) {
+                saved.loadout.pendingLevelUps = saved.loadout.pending.length > 0 && saved.loadout.pendingPicks <= 0
+                    ? [saved.loadout.level] : [];
+            }
+            migrateExpCurve(saved.loadout);
+            migrateWeaponUpgrades(saved.loadout);
+            SaveManager.saveLevel(saved);
             this._state = saved;
+            if (saved.defeatPending) {
+                this._phase = 'DEFEAT';
+                this.emitDefeat(saved);
+                return;
+            }
             this._phase = 'PLAYING';
             this.emitStart(saved, getLevelConfig(saved.levelId, saved.difficulty, saved.replay.percent));
+            this.flushBattleRewards();
             return;
         }
         this.backToSelect();
@@ -586,7 +632,6 @@ export class LevelFlow {
         this._damageTaken = 0;
         this._elementDamage = 0;
         this._resistReduced = 0;
-        this._rewardSeq = 0;
         this._adRetryLeft = MAX_AD_RETRY;
         this._phase = 'PLAYING';
         SaveManager.saveLevel(state);
@@ -609,10 +654,61 @@ export class LevelFlow {
      */
     retryLevel(): void {
         if (!this._state) return;
+        this._state.waveProgress = undefined;
+        this._state.killedEnemyIds = [];
+        this._state.battleCleared = false;
         this._phase = 'PLAYING';
         SaveManager.saveLevel(this._state);
         this.emitStart(this._state, getLevelConfig(
             this._state.levelId, this._state.difficulty, this._state.replay.percent));
+        this.flushBattleRewards();
+    }
+
+    /** 将战败写入单局存档，等待玩家选择复活、重试或退出。 */
+    markDefeat(): void {
+        const state = this._state;
+        if (!state || state.cleared) return;
+        state.defeatPending = true;
+        this._phase = 'DEFEAT';
+        SaveManager.saveLevel(state);
+        this.emitDefeat(state);
+    }
+
+    /** 看广告复活：保留本局成长和已结算敌人，从当前战场继续。 */
+    async reviveDefeated(): Promise<boolean> {
+        const state = this._state;
+        if (!state || this._phase !== 'DEFEAT') return false;
+        const ok = await AdReward.show(AdTag.REVIVE);
+        if (!ok) return false;
+        SaveManager.bumpAdView();
+        state.defeatPending = false;
+        state.battleCleared = false;
+        this._phase = 'PLAYING';
+        SaveManager.saveLevel(state);
+        this.emitStart(state, getLevelConfig(state.levelId, state.difficulty, state.replay.percent));
+        this.flushBattleRewards();
+        return true;
+    }
+
+    /** 不看广告重新挑战：保留本局成长，但从第一只敌人重新开始。 */
+    retryDefeated(): void {
+        const state = this._state;
+        if (!state || this._phase !== 'DEFEAT') return;
+        state.defeatPending = false;
+        state.killedEnemyIds = [];
+        state.waveProgress = undefined;
+        state.battleCleared = false;
+        this._phase = 'PLAYING';
+        SaveManager.saveLevel(state);
+        this.emitStart(state, getLevelConfig(state.levelId, state.difficulty, state.replay.percent));
+        this.flushBattleRewards();
+    }
+
+    /** 放弃本局并返回关卡选择；临时局内收益不会进入永久档案。 */
+    abandonDefeated(): void {
+        if (this._phase !== 'DEFEAT') return;
+        SaveManager.clearLevel();
+        this.backToSelect();
     }
 
     // ------------------------------------------------------------ 局内数据操作
@@ -634,7 +730,19 @@ export class LevelFlow {
 
     addElapsed(dt: number): void {
         if (!this._state) return;
-        this._state.elapsed += dt;
+        this._state.elapsed += Math.max(0, Math.min(dt, 1 / 30));
+    }
+
+    noteWaveProgress(progress?: import('../battle/BattleTypes').WaveProgress): void {
+        const state = this._state;
+        if (!state || state.cleared || !progress) return;
+        const previous = state.waveProgress;
+        state.waveProgress = progress;
+        // 每秒、击杀帧、波次变化和战败保存；选卡期间不推进。
+        if (!previous || Math.floor(previous.elapsed) !== Math.floor(progress.elapsed) ||
+            previous.waveIndex !== progress.waveIndex || this._loadoutDirty || this._phase === 'DEFEAT') {
+            SaveManager.saveLevel(state);
+        }
     }
 
     addKill(): void {
@@ -743,9 +851,26 @@ export class LevelFlow {
      * 智慧书 / 贪婪印记这类加成必须作用在"击杀产出"这一侧，
      * 而不是作用在升级门槛上，否则不同来源的加成会互相干扰。
      */
-    onEnemyKilled(): void {
-        if (!this._state || this.paused) return;
+    onEnemyKilled(enemyId?: number, expValue?: number, formExpValue?: number): void {
+        // 选卡在整帧结束后打开；同一帧范围攻击的每个死亡都必须结算。
+        if (!this._state || this._state.cleared || this._phase !== 'PLAYING') return;
         const state = this._state;
+        if (enemyId !== undefined) {
+            if (!state.killedEnemyIds) state.killedEnemyIds = [];
+            if (state.killedEnemyIds.indexOf(enemyId) >= 0) return;
+            state.killedEnemyIds.push(enemyId);
+
+            // 战败重试会重新生成同一组敌人：它们仍要记入当前战场去重表，
+            // 这样中途退出恢复时不会把本次重试已经打掉的敌人再次显示出来；
+            // 但历史上已发过奖励的 ID 不再重复发放成长与资源。
+            if (!state.rewardedEnemyIds) state.rewardedEnemyIds = [];
+            if (state.rewardedEnemyIds.indexOf(enemyId) >= 0) {
+                // 仍持久化当前重试中的击杀标记，保证退出后恢复不会重生这只怪。
+                SaveManager.saveLevel(state);
+                return;
+            }
+            state.rewardedEnemyIds.push(enemyId);
+        }
         const cfg = getLevelConfig(state.levelId, state.difficulty, state.replay.percent);
 
         this.addKill();
@@ -753,24 +878,52 @@ export class LevelFlow {
             (20 + state.levelId * 2) * cfg.diff.scoreMul * (1 + state.replay.percent)
         ));
 
-        const perDrop = Math.max(1, Math.round(cfg.reward['coin'] / Math.max(1, cfg.enemies)));
+        const k = state.kills;
+        const perDrop = cfg.waves
+            ? Math.floor(k * cfg.reward['coin'] / cfg.enemies) - Math.floor((k - 1) * cfg.reward['coin'] / cfg.enemies)
+            : Math.max(1, Math.round(cfg.reward['coin'] / Math.max(1, cfg.enemies)));
         this.addResource('coin', perDrop);
-        this.addStat('atk', 2);
-        this.addStat('hp', 4);
+        this.addStat('atk', cfg.waves ? Math.floor(k * 48 / cfg.enemies) - Math.floor((k - 1) * 48 / cfg.enemies) : 2);
+        this.addStat('hp', cfg.waves ? Math.floor(k * 96 / cfg.enemies) - Math.floor((k - 1) * 96 / cfg.enemies) : 4);
 
         const mod = this.modifierOf(state.loadout);
-        const amount = Math.max(1, Math.round(cfg.expPerEnemy * (1 + mod.expPct)));
-        const ups = gainExp(state.loadout, amount);
+        const index = (enemyId ?? state.kills) - 1;
+        const baseExp = expValue !== undefined && Number.isFinite(expValue) ? Math.max(0, expValue)
+            : cfg.waves ? cfg.expPerEnemy : cfg.experience ? experienceShare(cfg.experience.totalExp, cfg.enemies, index) : cfg.expPerEnemy;
+        // 自定义经验事件未给装备经验时保留旧接口语义；正式击杀传两种经验。
+        const baseFormExp = formExpValue !== undefined && Number.isFinite(formExpValue) ? Math.max(0, formExpValue)
+            : expValue !== undefined ? baseExp
+            : cfg.waves ? CONTINUOUS_FORM_EXP : cfg.experience ? experienceShare(cfg.experience.totalFormExp, cfg.enemies, index) : baseExp;
+        // 低单杀经验保留小数，避免智慧书等小幅加成被逐只取整吞掉。
+        const amount = Math.max(0, Number((baseExp * (1 + mod.expPct)).toFixed(6)));
+        const formAmount = Math.max(0, Number((baseFormExp * (1 + mod.expPct)).toFixed(6)));
+        gainExp(state.loadout, amount, formAmount);
+        this._loadoutDirty = true;
 
         // 路上遇到的形态都要进图鉴，否则"收录 N 种形态"永远只能收录终点
         SaveManager.markFormsSeen(allFormIdsOf(state.loadout));
         SaveManager.saveLevel(state);
 
-        // 一次击杀跨过多级在实战中不可能出现（等级门槛按 1.3 倍增长，
-        // 而单只经验是固定的），所以这里只开一次面板，不做待开队列。
-        if (ups > 0 && state.loadout.pending.length === 0) {
-            this.openReward();
+    }
+
+    /** 战斗整帧结束或续玩后调用。先同步成长，再恢复/打开奖励，最后处理通关。 */
+    flushBattleRewards(): void {
+        const state = this._state;
+        if (!state || state.cleared || this._phase !== 'PLAYING') return;
+        if (this._loadoutDirty) {
+            this._loadoutDirty = false;
+            this._loadoutChangedCbs.forEach((cb) => cb());
         }
+        if (state.loadout.pending.length > 0) {
+            this._phase = 'REWARD';
+            const payload = this.getRewardPayload();
+            if (payload) this._rewardCbs.forEach((cb) => cb(payload));
+            return;
+        }
+        if (state.loadout.pendingPicks > 0 || (state.loadout.pendingLevelUps?.length ?? 0) > 0) {
+            if (this.openReward()) return;
+        }
+        if (state.battleCleared) this.onLevelClear();
     }
 
     /**
@@ -780,25 +933,33 @@ export class LevelFlow {
      *          合成补选时如果池子空了却没把阶段改回 PLAYING，玩家会卡在
      *          一个空面板上再也动不了，这是必须在这里堵住的死锁。
      */
-    private openReward(): boolean {
+    private openReward(force = false): boolean {
         const state = this._state;
         if (!state) return false;
 
+        if (!force && state.kills <= 0 && !state.loadout.pendingLevelUps?.length) {
+            state.loadout.pending = [];
+            state.loadout.pendingPicks = 0;
+            this._phase = 'PLAYING';
+            return false;
+        }
+
         const carry = state.carrySource !== 'none';
-        this._rewardSeq += 1;
+        state.loadout.rewardSequence = (state.loadout.rewardSequence ?? 0) + 1;
+        const rewardLevel = state.loadout.pendingLevelUps?.[0] ?? state.loadout.level;
 
         const ctx: RewardContext = {
             loadout: state.loadout,
             allowAdvanced: carry,
             weaponCap: weaponSlotCap(carry),
             auxCap: auxSlotCap(carry),
-            level: state.loadout.level,
+            level: rewardLevel,
             ownedEquipIds: EquipmentManager.getOwnedList().map((e) => e.id),
             seenForms: SaveManager.getSeenForms(),
             // 种子随"关卡 + 难度 + 等级 + 本局序号"变化：
             // 同一局的同一次升级永远给同样的三张卡（防重开刷卡），
             // 但不同局之间不会雷同。
-            rng: makeRng(state.levelId * 7919 + state.difficulty * 1313 + state.loadout.level * 17 + this._rewardSeq),
+            rng: makeRng(state.levelId * 7919 + state.difficulty * 1313 + rewardLevel * 17 + state.loadout.rewardSequence),
         };
 
         const options = pickRewards(ctx);
@@ -807,7 +968,9 @@ export class LevelFlow {
             console.log('[Level] 无可用奖励卡，放弃本次三选一');
             state.loadout.pending = [];
             state.loadout.pendingPicks = 0;
+            state.loadout.pendingLevelUps = [];
             this._phase = 'PLAYING';
+            SaveManager.saveLevel(state);
             return false;
         }
 
@@ -829,17 +992,24 @@ export class LevelFlow {
      */
     chooseReward(index: number): ApplyResult | null {
         const state = this._state;
-        if (!state) return null;
+        if (!state || this._phase !== 'REWARD') return null;
         const opt = state.loadout.pending[index];
         if (!opt) return null;
 
         const carry = state.carrySource !== 'none';
-        const caps = { weaponCap: weaponSlotCap(carry), auxCap: auxSlotCap(carry) };
+        const caps = { weaponCap: weaponSlotCap(carry), auxCap: auxSlotCap(carry), allowAdvanced: carry };
+        const refillBefore = state.loadout.pendingPicks;
         const res = applyReward(state.loadout, opt, caps);
 
         if (!res.ok) {
             console.warn('[Level] 奖励无法应用：' + res.message);
             return res;
+        }
+        if (refillBefore > 0) {
+            // 本次补选必定消耗一次；若再次合成，额外生成一次补选。
+            state.loadout.pendingPicks = refillBefore - 1 + (res.openedPick ? 1 : 0);
+        } else {
+            state.loadout.pendingLevelUps?.shift();
         }
 
         if (res.event) {
@@ -850,12 +1020,9 @@ export class LevelFlow {
 
         SaveManager.markFormsSeen(allFormIdsOf(state.loadout));
         SaveManager.saveLevel(state);
-
-        // 合成会释放出待补选名额时立刻再开一次三选一；
-        // 若池子已空（openReward 返回 false），它已经把阶段归位，这里不再重复设置。
-        if (!(state.loadout.pendingPicks > 0 && this.openReward())) {
-            this._phase = 'PLAYING';
-        }
+        this._phase = 'PLAYING';
+        this._loadoutDirty = true;
+        this.flushBattleRewards();
         return res;
     }
 
@@ -871,7 +1038,7 @@ export class LevelFlow {
         const carry = state.carrySource !== 'none';
         return {
             options: state.loadout.pending.slice(),
-            level: state.loadout.level,
+            level: state.loadout.pendingLevelUps?.[0] ?? state.loadout.level,
             slotText: '武器 ' + state.loadout.weapons.length + '/' + weaponSlotCap(carry) +
                 '　辅助 ' + state.loadout.auxes.length + '/' + auxSlotCap(carry),
             refill: state.loadout.pendingPicks > 0,
@@ -887,10 +1054,12 @@ export class LevelFlow {
     debugGainExp(amount: number): void {
         const state = this._state;
         if (!state) return;
-        const ups = gainExp(state.loadout, amount);
+        gainExp(state.loadout, amount);
         SaveManager.markFormsSeen(allFormIdsOf(state.loadout));
         SaveManager.saveLevel(state);
-        if (ups > 0 && state.loadout.pending.length === 0) this.openReward();
+        if (this._phase === 'PLAYING' && state.loadout.pending.length === 0 && state.loadout.pendingLevelUps?.length) {
+            this.openReward(true);
+        }
     }
 
     // ------------------------------------------------------------ 通关结算
@@ -900,8 +1069,15 @@ export class LevelFlow {
      * 并做一次成就判定。
      */
     onLevelClear(): SettlePayload | null {
-        if (!this._state) return null;
+        if (!this._state || this._state.cleared) return null;
         const state = this._state;
+        state.battleCleared = true;
+        // 最后一只怪产生的奖励领取完再结算；标志与队列一同持久化。
+        SaveManager.saveLevel(state);
+        if (state.loadout.pending.length > 0 || state.loadout.pendingPicks > 0 || state.loadout.pendingLevelUps?.length) {
+            this.flushBattleRewards();
+            return null;
+        }
         const tier = normalizeTier(state.difficulty);
         state.cleared = true;
 
@@ -1141,6 +1317,26 @@ export class LevelFlow {
 
     private emitStart(s: LevelState, cfg: LevelConfigItem): void {
         this._startCbs.forEach((cb) => cb(s, cfg));
+    }
+
+    private emitDefeat(state: LevelState): void {
+        const cfg = getLevelConfig(state.levelId, state.difficulty, state.replay.percent);
+        const equipment = [...state.loadout.weapons, ...state.loadout.auxes]
+            .map((e) => e.formId || e.id).join('、');
+        const payload: DefeatPayload = {
+            levelId: state.levelId,
+            difficulty: state.difficulty,
+            difficultyName: cfg.diff.name,
+            score: state.score,
+            elapsed: state.elapsed,
+            kills: state.kills,
+            level: state.loadout.level,
+            progress: levelProgress(state.loadout),
+            coin: state.resources.coin || 0,
+            evolutionCount: this._runEvents.length,
+            equipmentText: equipment || '无',
+        };
+        this._defeatCbs.forEach((cb) => cb(payload));
     }
 
     private emitLoadout(p: LoadoutPayload): void {

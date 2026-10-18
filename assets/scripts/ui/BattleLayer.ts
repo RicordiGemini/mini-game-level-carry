@@ -56,7 +56,7 @@ const C_JOY = new Color(120, 144, 200, 190);
 /** 战斗回调，由 GameEntry 注入 */
 export interface BattleLayerHooks {
     /** 击杀一只敌人 */
-    onEnemyKilled?: () => void;
+    onEnemyKilled?: (enemyId: number, expValue: number, formExpValue?: number) => void;
     /** 全部清空 */
     onCleared?: () => void;
     /** 玩家阵亡 */
@@ -128,6 +128,9 @@ export class BattleLayer extends Component {
             pierceResist?: number;
             /** 破防比例：装备够好就无视克制 */
             counterBreak?: number;
+            playerSpeed?: number;
+            killedEnemyIds?: number[];
+            waveProgress?: import('../battle/BattleTypes').WaveProgress;
         }
     ): void {
         this._hooks = hooks;
@@ -141,6 +144,9 @@ export class BattleLayer extends Component {
             playerHp: Math.max(1, Math.round(playerHp)),
             weapons,
             enemy: buildEnemySpawnSpec(cfg),
+            waveProgress: extra?.waveProgress,
+            playerSpeed: extra?.playerSpeed,
+            killedEnemyIds: extra?.killedEnemyIds,
             shield: extra && extra.shield ? Math.max(0, Math.round(extra.shield)) : 0,
             thorns: extra && extra.thorns ? Math.max(0, extra.thorns) : 0,
             // 属性抗性：抗性只减元素伤害、不给免疫（上限 75%）
@@ -169,8 +175,8 @@ export class BattleLayer extends Component {
 
     private bindWorldEvents(): void {
         this.world.cb = {
-            onEnemyKilled: () => {
-                if (this._hooks.onEnemyKilled) this._hooks.onEnemyKilled();
+            onEnemyKilled: (enemy) => {
+                this._hooks.onEnemyKilled?.(enemy.id, enemy.expValue, enemy.formExpValue);
             },
             onCleared: () => {
                 if (this._hooks.onCleared) this._hooks.onCleared();
@@ -472,8 +478,11 @@ export class BattleLayer extends Component {
         const lines: string[] = [];
 
         const ranged = w.rangedCount;
+        const wave = w.waveStatus;
+        if (wave) lines.push(wave.clearing ? '最后一波已结束 · 清理剩余怪物'
+            : '第 ' + wave.index + '/' + wave.count + ' 波 · 剩余 ' + Math.ceil(wave.remaining) + 's · 持续刷怪');
         lines.push('第 ' + this._levelId + ' 关 · ' + this._diffName +
-            '　剩余 ' + w.remaining +
+            '　场上 ' + w.remaining +
             '　击杀 ' + w.stats.kills +
             (ranged > 0 ? '　远程 ' + ranged : '') +
             '　' + w.time.toFixed(1) + 's');

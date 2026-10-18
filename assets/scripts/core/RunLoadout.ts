@@ -27,19 +27,35 @@ import {
     EquipRunState, EvolutionEvent, RewardOption, RunLoadoutState, SlotKind,
 } from '../data/GameTypes';
 import {
-    depthExpNeed, getForm, getRootOf, legacyFormId, requireForm,
+    depthExpNeed, getForm, getRootOf, legacyFormId, requireForm, getEvolveOptions,
     formLevelOf, FORM_LV_ATK_PCT,
 } from '../data/FormConfig';
-import { MAX_RUN_LEVEL, levelExpFor } from '../data/RunConfig';
+import { MAX_RUN_LEVEL, levelExpFor, WEAPON_UPGRADES_REQUIRED, WEAPON_UPGRADE_ATK_PCT } from '../data/RunConfig';
 import { getTalentDef } from '../data/TalentConfig';
-import { resolveFormId } from './FormGraph';
+import { resolveFormId, weaponUpgradeCount, isReadyToEvolve, findFusions, readyEvolutions } from './FormGraph';
+
+/** 旧档不凭培养经验补算强化；保留形态与奖励次数，重建旧规则面板。 */
+export function migrateWeaponUpgrades(lo: RunLoadoutState): void {
+    for (const w of lo.weapons) w.upgrades = weaponUpgradeCount(w);
+    if (lo.weaponUpgradeVersion === 1) return;
+    lo.pending = [];
+    lo.weaponUpgradeVersion = 1;
+}
 
 /** 新建一个空的局内 build */
 export function emptyLoadout(): RunLoadoutState {
     return {
         weapons: [], auxes: [], talents: {},
-        level: 1, pendingExp: 0, pendingPicks: 0, pending: [],
+        level: 1, pendingExp: 0, pendingPicks: 0, pending: [], pendingLevelUps: [], rewardSequence: 0, expCurveVersion: 2, weaponUpgradeVersion: 1,
     };
+}
+
+/** 保留旧档等级、已攒进度比例、装备经验和未领取奖励，不因改曲线直接补发升级。 */
+export function migrateExpCurve(lo: RunLoadoutState): void {
+    if ((lo.expCurveVersion ?? 1) >= 2) return;
+    const oldNeed = Math.round(70 * Math.pow(1.30, Math.max(0, lo.level - 1)));
+    lo.pendingExp = Math.floor(Math.max(0, Math.min(1, lo.pendingExp / oldNeed)) * levelExpFor(lo.level));
+    lo.expCurveVersion = 2;
 }
 
 /**
@@ -85,6 +101,8 @@ export function createRunLoadout(
                 kind: 'weapon',
                 stage: form.depth,
                 exp: Math.max(0, Math.floor(old.exp)),
+                upgrades: weaponUpgradeCount(old),
+                evolvedUpgradeAtkPct: Math.max(0, old.evolvedUpgradeAtkPct || 0),
             });
         } else {
             lo.weapons.push({
@@ -128,24 +146,27 @@ export function createRunLoadout(
 /**
  * 发放经验。
  *
- * 同一份经验会同时喂给两条曲线：
+ * 经验投放到两条独立预算的曲线：
  *   关卡等级 —— 用来触发三选一（节奏由它控制）
  *   装备形态 —— 用来决定哪些槽可以进化（深度由它控制）
  *
  * @param amount 已乘过经验加成之后的值
- * @returns 本次升了几级（>0 表示要弹一次三选一）
+ * @returns 本次升了几级；每级奖励写入队列，由流程层依次展示。
  */
-export function gainExp(lo: RunLoadoutState, amount: number): number {
-    if (amount <= 0) return 0;
+export function gainExp(lo: RunLoadoutState, amount: number, formAmount = amount): number {
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+    if (!lo.pendingLevelUps) lo.pendingLevelUps = [];
 
-    for (const w of lo.weapons) w.exp += amount;
-    for (const a of lo.auxes) a.exp += amount;
+    const formExp = Number.isFinite(formAmount) ? Math.max(0, formAmount) : 0;
+    for (const w of lo.weapons) w.exp = Number((w.exp + formExp).toFixed(6));
+    for (const a of lo.auxes) a.exp = Number((a.exp + formExp).toFixed(6));
 
-    lo.pendingExp += amount;
+    lo.pendingExp = Number((lo.pendingExp + amount).toFixed(6));
     let ups = 0;
     while (lo.level < MAX_RUN_LEVEL && lo.pendingExp >= levelExpFor(lo.level)) {
         lo.pendingExp -= levelExpFor(lo.level);
         lo.level += 1;
+        lo.pendingLevelUps.push(lo.level);
         ups += 1;
     }
     return ups;
@@ -203,19 +224,27 @@ function carryExpOver(exp: number, fromDepth: number): number {
 export function applyReward(
     lo: RunLoadoutState,
     opt: RewardOption,
-    caps: { weaponCap: number; auxCap: number }
+    caps: { weaponCap: number; auxCap: number; allowAdvanced?: boolean }
 ): ApplyResult {
     switch (opt.kind) {
         case 'weapon_new':
             return applyWeaponNew(lo, opt, caps.weaponCap);
         case 'weapon_evolve':
-            return applyEvolve(lo, opt, 'weapon');
+            return applyEvolve(lo, opt, 'weapon', caps.allowAdvanced ?? false);
+        case 'weapon_upgrade': {
+            const slot = lo.weapons[opt.slotIndex];
+            if (!slot || resolveFormId(slot) !== opt.formId) return fail('武器已改变');
+            if (weaponUpgradeCount(slot) >= WEAPON_UPGRADES_REQUIRED) return fail('当前武器已强化五次');
+            slot.upgrades = weaponUpgradeCount(slot) + 1;
+            lo.pending = [];
+            return { ok: true, consumedSlot: false, openedPick: false, message: '武器强化 ' + slot.upgrades + '/5' };
+        }
         case 'weapon_fusion':
-            return applyFusion(lo, opt);
+            return applyFusion(lo, opt, caps.allowAdvanced ?? false);
         case 'aux_new':
             return applyAuxNew(lo, opt, caps.auxCap);
         case 'aux_evolve':
-            return applyEvolve(lo, opt, 'aux');
+            return applyEvolve(lo, opt, 'aux', caps.allowAdvanced ?? false);
         case 'talent':
             return applyTalent(lo, opt);
         default:
@@ -228,6 +257,7 @@ function applyWeaponNew(lo: RunLoadoutState, opt: RewardOption, cap: number): Ap
     if (!formId) return fail('缺少形态');
     const form = getForm(formId);
     if (!form || form.kind !== 'weapon') return fail('不是武器形态');
+    if (form.depth !== 0) return fail('新武器必须从基础形态获得');
     if (lo.weapons.length >= cap) return fail('武器槽已满');
 
     lo.weapons.push({
@@ -265,7 +295,7 @@ function applyAuxNew(lo: RunLoadoutState, opt: RewardOption, cap: number): Apply
  * 武器与辅助装备走同一条代码路径，因为规则完全一样：
  * 只换形态，数组长度不变。这也是"辅助装备不会消失"的实现保证。
  */
-function applyEvolve(lo: RunLoadoutState, opt: RewardOption, kind: SlotKind): ApplyResult {
+function applyEvolve(lo: RunLoadoutState, opt: RewardOption, kind: SlotKind, allowAdvanced: boolean): ApplyResult {
     const target = opt.formId ? getForm(opt.formId) : null;
     if (!target || target.kind !== kind) return fail('不是可用的进化形态');
 
@@ -278,10 +308,16 @@ function applyEvolve(lo: RunLoadoutState, opt: RewardOption, kind: SlotKind): Ap
     const from = getForm(fromId);
     if (!from) return fail('原形态不存在');
     if (from.id === target.id) return fail('已经是该形态');
+    if (!getEvolveOptions(from.id, allowAdvanced).some(e => e.type === 'upgrade' && e.to === target.id)) return fail('不是当前形态的进化路线');
+    if (!isReadyToEvolve(slot, lo)) return fail(kind === 'weapon' ? '需要强化五次并持有配套辅助装备' : '辅助培养经验不足');
 
     slot.formId = target.id;
     slot.stage = target.depth;
     slot.exp = carryExpOver(slot.exp, from.depth);
+    if (kind === 'weapon') {
+        slot.evolvedUpgradeAtkPct = (slot.evolvedUpgradeAtkPct || 0) + weaponUpgradeCount(slot) * WEAPON_UPGRADE_ATK_PCT;
+        slot.upgrades = 0;
+    }
 
     const ev: EvolutionEvent = {
         slotIndex: idx, kind,
@@ -307,7 +343,7 @@ function applyEvolve(lo: RunLoadoutState, opt: RewardOption, kind: SlotKind): Ap
  *   - B 槽被删除
  *   - pendingPicks +1，下一次三选一强制给新武器候选
  */
-function applyFusion(lo: RunLoadoutState, opt: RewardOption): ApplyResult {
+function applyFusion(lo: RunLoadoutState, opt: RewardOption, allowAdvanced: boolean): ApplyResult {
     const target = opt.formId ? getForm(opt.formId) : null;
     if (!target || target.kind !== 'weapon') return fail('不是武器形态');
 
@@ -327,6 +363,8 @@ function applyFusion(lo: RunLoadoutState, opt: RewardOption): ApplyResult {
     const fromA = getForm(resolveFormId(slotA));
     const fromB = getForm(resolveFormId(slotB));
     if (!fromA || !fromB) return fail('材料形态不存在');
+    if (!findFusions(lo, allowAdvanced).some(m => m.recipe.to === target.id &&
+        ((m.indexA === ia && m.indexB === ib) || (m.indexA === ib && m.indexB === ia)))) return fail('合成条件未满足：双方需强化五次并持有配套辅助');
 
     const leftOver = Math.min(carryExpOver(slotA.exp, fromA.depth), carryExpOver(slotB.exp, fromB.depth));
 
@@ -334,6 +372,10 @@ function applyFusion(lo: RunLoadoutState, opt: RewardOption): ApplyResult {
     slotA.stage = target.depth;
     slotA.id = target.sources.length > 0 ? target.sources[0] : slotA.id;
     slotA.exp = leftOver;
+    slotA.evolvedUpgradeAtkPct = Math.max(
+        (slotA.evolvedUpgradeAtkPct || 0) + weaponUpgradeCount(slotA) * WEAPON_UPGRADE_ATK_PCT,
+        (slotB.evolvedUpgradeAtkPct || 0) + weaponUpgradeCount(slotB) * WEAPON_UPGRADE_ATK_PCT);
+    slotA.upgrades = 0;
 
     // 先删较大的下标，避免删除后下标失效
     lo.weapons.splice(ib, 1);
@@ -407,6 +449,8 @@ export function toArchiveStates(lo: RunLoadoutState): EquipRunState[] {
             kind: st.kind,
             stage: st.stage,
             exp: Math.max(0, Math.floor(st.exp)),
+            upgrades: st.kind === 'weapon' ? weaponUpgradeCount(st) : undefined,
+            evolvedUpgradeAtkPct: st.evolvedUpgradeAtkPct,
         });
     };
     for (const w of lo.weapons) push(w);
@@ -425,7 +469,7 @@ export function slotHasOpenEvolve(lo: RunLoadoutState, index: number, kind: Slot
     const f = getForm(resolveFormId(st));
     if (!f) return false;
     if (f.evolveTo.length === 0) return false;
-    return st.exp >= depthExpNeed(f.depth);
+    return readyEvolutions(lo, false).some(m => m.kind === kind && m.slotIndex === index);
 }
 
 /** v2 老档案的 (id, stage) → formId，供迁移使用 */

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Roguelike 怪物波次规划"
+  short_description: "按关卡、难度和敌人约束生成 Roguelike 波次配置表"
+  default_prompt: "使用 $roguelike-wave-planner，根据我提供的关卡和敌人参数生成怪物波次配置表。"
+policy:
+  allow_implicit_invocation: true

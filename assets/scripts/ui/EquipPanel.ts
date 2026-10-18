@@ -59,12 +59,12 @@ export class EquipPanel extends Component {
     @property(Label) slotLabel: Label = null!;
 
 onLoad(): void {
-    this.closeBtn?.on(Node.EventType.TOUCH_END, this.hide, this);
+    this.closeBtn?.on(Node.EventType.TOUCH_END, this.close, this);
     this.node.active = false;
     }
 
     onDestroy(): void {
-    this.closeBtn?.off(Node.EventType.TOUCH_END, this.hide, this);
+    this.closeBtn?.off(Node.EventType.TOUCH_END, this.close, this);
     }
 
     /**
@@ -85,7 +85,7 @@ onLoad(): void {
         TutorialLayer.showTipById('tip_equip');
     }
 
-    private hide(): void {
+    public close(): void {
         this.node.active = false;
     }
 

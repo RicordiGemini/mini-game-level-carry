@@ -28,7 +28,7 @@
  *   - 广告未播完时不能清空任何数据，要允许玩家重新选择。
  */
 
-import { _decorator, Component, Label, Node, Button, tween, Vec3 } from 'cc';
+import { _decorator, Component, Label, Node, Button, Tween, tween, Vec3 } from 'cc';
 import { LevelFlow, LoadoutPayload } from '../core/LevelFlow';
 import { AdReward, AdTag } from '../ad/AdReward';
 import { getForm } from '../data/FormConfig';
@@ -64,7 +64,7 @@ export class LoadoutPanel extends Component {
     onDestroy(): void {
         this.carryBtn?.off(Node.EventType.TOUCH_END, this.onCarryClicked, this);
         this.freshBtn?.off(Node.EventType.TOUCH_END, this.onFreshClicked, this);
-        this.node.stopAllActions();
+        Tween.stopAllByTarget(this.node);
     }
 
     private show(p: LoadoutPayload): void {
@@ -104,7 +104,7 @@ export class LoadoutPanel extends Component {
 
         // 刚通关立刻重玩是转化率最高的场景，按钮做轻微呼吸动画强化引导
         if (p.justCleared && this.carryBtn) {
-            this.carryBtn.stopAllActions();
+            Tween.stopAllByTarget(this.carryBtn);
             tween(this.carryBtn)
                 .to(0.6, { scale: new Vec3(1.04, 1.04, 1) })
                 .to(0.6, { scale: new Vec3(1, 1, 1) })

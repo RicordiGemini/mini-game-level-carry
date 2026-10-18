@@ -61,6 +61,8 @@ import { SaveManager } from './SaveManager';
 import { socketBonusOf, socketsOf } from './ForgeManager';
 import { aimOf, resolveFormId } from './FormGraph';
 import { formLevelAtkPct } from './RunLoadout';
+import { WEAPON_UPGRADE_ATK_PCT } from '../data/RunConfig';
+import { weaponUpgradeCount, weaponEvolutionHint } from './FormGraph';
 
 /**
  * 局外可同时出战的武器数量上限。
@@ -389,7 +391,8 @@ export class EquipmentManager {
             const innate = innateBonusOfWeapon(rootId);
 
             const base = (this.baseDamageOfForm(form.sources) + levelFlatAtk / n) * rarityMul;
-            const atkPct = form.atkPct + formLevelAtkPct(st.exp) + mod.atkPct +
+            const atkPct = form.atkPct + formLevelAtkPct(st.exp) + weaponUpgradeCount(st) * WEAPON_UPGRADE_ATK_PCT +
+                (st.evolvedUpgradeAtkPct || 0) + mod.atkPct +
                 elAtkPct + (innate.atkPct || 0);
             const damage = Math.max(1, Math.round(base * (1 + atkPct) * affinityMul));
 
@@ -523,6 +526,7 @@ export class EquipmentManager {
         if (form.atkPct) parts.push('攻击 +' + Math.round(form.atkPct * 100) + '%');
         parts.push(aim);
         if (lv > 1) parts.push('Lv.' + lv);
+        if (form.kind === 'weapon') parts.push(weaponEvolutionHint(st));
         return form.name + '（' + parts.join(' · ') + '）';
     }
 

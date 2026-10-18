@@ -48,11 +48,13 @@ import {
     KITE_DEADZONE,
     PLAYER_RADIUS,
     PLAYER_SPEED,
+    PlayerCombatSpec,
     Projectile,
     SPAWN_SAFE_DIST,
     Vec2,
     WeaponRuntime,
     WeaponSpec,
+    WaveProgress,
     ZERO,
     makeRng,
     fullScreenRange,
@@ -175,12 +177,19 @@ export class BattleWorld {
     private _nextId = 1;
     private _spawnLeft = 0;
     private _batchTimer = 0;
+    private _waveIndex = 0;
+    private _waveElapsed = 0;
+    /** 密集怪群的统一受击保护，避免同帧叠伤。 */
+    private _hurtCooldown = 0;
+    private _waveByEnemy = new Map<number, number>();
     /** 已投放的批次数，阵型摆位按它决定"这一批从哪来" */
     private _batchIndex = 0;
     /** 额外弹道的 id 分配，避免与工厂产出的判定体撞号 */
     private _extraShotId = 900000;
     /** 荆棘反伤值（来自天赋 / 辅助装备） */
     private _thorns = 0;
+    private _shieldBonus = 0;
+    private _killedEnemyIds = new Set<number>();
     private _enemySpec: BattleSetup['enemy'] | null = null;
     /**
      * 出生队列：开打前就把"这一关的敌人分别是近战还是远程"洗好牌，
@@ -225,6 +234,7 @@ export class BattleWorld {
             : fullScreenRange(this.arenaW, this.arenaH);
         this._rng = makeRng(cfg.seed ?? 20261014);
         this._nextId = 1;
+        this._killedEnemyIds = new Set(cfg.killedEnemyIds ?? []);
         resetProjectileIds();
 
         this.player = {
@@ -244,6 +254,7 @@ export class BattleWorld {
         this.enemyShots = [];
         this.weapons = cfg.weapons.map((w) => this.toRuntime(w));
         this._thorns = Math.max(0, cfg.thorns ?? 0);
+        this._shieldBonus = this.player.shield;
         this._resist = cfg.resist || {};
         this._pierceResist = Math.max(0, Math.min(0.9, cfg.pierceResist || 0));
         this._counterBreak = Math.max(0, Math.min(0.9, cfg.counterBreak || 0));
@@ -254,7 +265,7 @@ export class BattleWorld {
         };
         this._enemySpec = cfg.enemy;
         this._spawnLeft = cfg.enemy.count;
-        this._spawnKinds = this.buildSpawnKinds(cfg.enemy);
+        this._spawnKinds = cfg.enemy.waves ? [] : this.buildSpawnKinds(cfg.enemy);
         this._spawnKindIdx = 0;
         this._elementPool = cfg.enemy.elements && cfg.enemy.elements.length
             ? cfg.enemy.elements.slice()
@@ -270,6 +281,45 @@ export class BattleWorld {
 
         this.result = 'ongoing';
         this.running = true;
+
+        this._waveIndex = 0;
+        this._waveElapsed = 0;
+        this._hurtCooldown = 0;
+        this._waveByEnemy.clear();
+        if (cfg.enemy.waves?.length) {
+            this._spawnLeft = 0;
+            const p = cfg.waveProgress;
+            const total = cfg.enemy.waves.reduce((n, w) => n + w.duration, 0);
+            if (p?.version === 1 && Number.isFinite(p.elapsed) && p.elapsed >= 0 &&
+                Number.isInteger(p.nextId) && p.nextId > 0 && p.nextId < 10000000 &&
+                Number.isInteger(p.waveIndex) && p.waveIndex >= 0 && p.waveIndex <= cfg.enemy.waves.length &&
+                Number.isFinite(p.waveElapsed) && p.waveElapsed >= 0 &&
+                Number.isFinite(p.spawnTimer) && p.spawnTimer >= 0 && Array.isArray(p.alive) &&
+                p.waveElapsed < (cfg.enemy.waves[p.waveIndex]?.duration ?? 1) &&
+                Math.abs(Math.min(p.elapsed, total) - (cfg.enemy.waves.slice(0, p.waveIndex).reduce((n, w) => n + w.duration, 0) + p.waveElapsed)) < .1) {
+                this.time = p.elapsed;
+                this.stats.elapsed = this.time;
+                this._waveIndex = p.waveIndex;
+                this._waveElapsed = p.waveElapsed;
+                this._batchTimer = Math.min(p.spawnTimer, cfg.enemy.waves[p.waveIndex]?.spawnInterval ?? 1);
+                const seen = new Set<number>();
+                let restoredCount = 0;
+                for (const ref of p.alive) {
+                    if (restoredCount >= (cfg.enemy.maxAlive ?? 240)) break;
+                    if (!ref || typeof ref !== 'object' || !Number.isInteger(ref.id) || ref.id < 1 || ref.id >= p.nextId || seen.has(ref.id) ||
+                        !Number.isInteger(ref.waveIndex) || !cfg.enemy.waves[ref.waveIndex] || ref.waveIndex > p.waveIndex || this._killedEnemyIds.has(ref.id)) continue;
+                    seen.add(ref.id);
+                    this._nextId = ref.id;
+                    this.enemies.push(this.makeEnemy(ref.waveIndex));
+                    restoredCount += 1;
+                }
+                this._nextId = p.nextId;
+            } else {
+                this.spawnTimedBatch();
+                this._batchTimer = cfg.enemy.waves[0].spawnInterval;
+            }
+            return;
+        }
 
         // 立刻放第一批，别让玩家开局空等
         this.spawnBatch();
@@ -471,6 +521,23 @@ export class BattleWorld {
         this.weapons = next;
     }
 
+    /** 重复同步不会回血或补满护盾；只应用新增的生命/护盾额度。 */
+    syncPlayerStats(spec: PlayerCombatSpec): void {
+        const maxHp = Math.max(1, Math.round(spec.maxHp));
+        const deltaHp = maxHp - this.player.maxHp;
+        this.player.maxHp = maxHp;
+        if (this.player.alive) this.player.hp = Math.max(1, Math.min(maxHp, this.player.hp + deltaHp));
+        const shield = Math.max(0, Math.round(spec.shield));
+        this.player.shield = Math.max(0, this.player.shield + shield - this._shieldBonus);
+        this._shieldBonus = shield;
+        this.player.speed = Math.max(0, spec.speed);
+        this._thorns = Math.max(0, spec.thorns);
+        this._resist = { ...spec.resist };
+        this._pierceResist = Math.max(0, Math.min(0.9, spec.pierceResist));
+        this._counterBreak = Math.max(0, Math.min(0.9, spec.counterBreak));
+        this.cb.onPlayerHpChanged?.(this.player.hp, this.player.maxHp);
+    }
+
     // ================================================================
     // 主循环
     // ================================================================
@@ -482,6 +549,7 @@ export class BattleWorld {
         const step = Math.min(dt, 1 / 30);
         this.time += step;
         this.stats.elapsed = this.time;
+        this._hurtCooldown = Math.max(0, this._hurtCooldown - step);
 
         this.updatePlayer(step);
         this.updateWeapons(step);
@@ -953,6 +1021,26 @@ export class BattleWorld {
 
     /** 5. 分波生成 */
     private updateSpawn(dt: number): void {
+        if (this._enemySpec?.waves?.length) {
+            const waves = this._enemySpec.waves;
+            if (this._waveIndex >= waves.length) return;
+            this._waveElapsed += dt;
+            this._batchTimer -= dt;
+            if (this._waveElapsed + 1e-7 >= waves[this._waveIndex].duration) {
+                this._waveElapsed = 0;
+                this._waveIndex++;
+                if (this._waveIndex < waves.length) {
+                    this.spawnTimedBatch();
+                    this._batchTimer = waves[this._waveIndex].spawnInterval;
+                }
+                return;
+            }
+            if (this._batchTimer <= 1e-7) {
+                this.spawnTimedBatch();
+                this._batchTimer += waves[this._waveIndex].spawnInterval;
+            }
+            return;
+        }
         if (this._spawnLeft <= 0 || !this._enemySpec) return;
         this._batchTimer -= dt;
         if (this._batchTimer > 0) return;
@@ -965,10 +1053,37 @@ export class BattleWorld {
         const spec = this._enemySpec;
         const n = Math.min(spec.batchSize, this._spawnLeft);
         for (let i = 0; i < n; i++) {
-            this.enemies.push(this.makeEnemy());
+            const enemy = this.makeEnemy();
+            if (!this._killedEnemyIds.has(enemy.id)) this.enemies.push(enemy);
             this._spawnLeft -= 1;
         }
         this._batchIndex += 1;
+    }
+
+    private spawnTimedBatch(): void {
+        const spec = this._enemySpec!;
+        const wave = spec.waves![this._waveIndex];
+        if (!wave) return;
+        const capacity = Math.max(0, (spec.maxAlive ?? 240) - this.aliveEnemies.length);
+        for (let i = 0; i < Math.min(wave.spawnCount, capacity); i++) {
+            const enemy = this.makeEnemy(this._waveIndex);
+            if (!this._killedEnemyIds.has(enemy.id)) this.enemies.push(enemy);
+        }
+    }
+
+    get waveProgress(): WaveProgress | undefined {
+        if (!this._enemySpec?.waves?.length) return undefined;
+        return { version: 1, elapsed: this.time, waveIndex: this._waveIndex, waveElapsed: this._waveElapsed,
+            spawnTimer: Math.max(0, this._batchTimer), nextId: this._nextId,
+            alive: this.aliveEnemies.map(e => ({ id: e.id, waveIndex: this._waveByEnemy.get(e.id) ?? 0 })) };
+    }
+
+    get waveStatus(): { index: number; count: number; remaining: number; clearing: boolean } | null {
+        const waves = this._enemySpec?.waves;
+        if (!waves?.length) return null;
+        return { index: Math.min(waves.length, this._waveIndex + 1), count: waves.length,
+            remaining: Math.max(0, (waves[this._waveIndex]?.duration ?? 0) - this._waveElapsed),
+            clearing: this._waveIndex >= waves.length };
     }
 
     /**
@@ -1073,9 +1188,22 @@ export class BattleWorld {
      *   - swift：血 −30%，移速 +70%（贴近速度极快）
      *   - charger：血 +20%，蓄力 0.8s → 冲刺 0.5s × 3.5 倍速度，命中 = atk × 2
      */
-    private makeEnemy(): EnemyState {
+    private makeEnemy(waveIndex?: number): EnemyState {
         const spec = this._enemySpec!;
-        const kind: EnemyKind = this._spawnKinds[this._spawnKindIdx++] || 'melee';
+        const wave = waveIndex === undefined ? undefined : spec.waves?.[waveIndex];
+        if (wave) {
+            this._rng = makeRng(this._nextId * 977 + waveIndex! * 131);
+            this._spawnKindIdx = this._nextId - 1;
+        }
+        let kind: EnemyKind;
+        if (wave) {
+            const roll = this._rng();
+            kind = roll < (spec.rangedRatio ?? 0) ? 'ranged'
+                : roll < (spec.rangedRatio ?? 0) + (spec.swiftRatio ?? 0) ? 'swift'
+                : roll < (spec.rangedRatio ?? 0) + (spec.swiftRatio ?? 0) + (spec.chargerRatio ?? 0) ? 'charger' : 'melee';
+            this._spawnKindIdx++;
+            this._waveByEnemy.set(this._nextId, waveIndex!);
+        } else kind = this._spawnKinds[this._spawnKindIdx++] || 'melee';
         const slot = this._spawnKindIdx - 1;
         const pos = spec.formation ? this.rollSpawnPos(spec.formation, slot) : this.rollLegacyPos();
         const x = pos.x;
@@ -1098,14 +1226,16 @@ export class BattleWorld {
             hpMul = 1.2;
             speedMul = 1.0;
         }
+        if (wave) { hpMul = wave.hpMul; shieldFrac = 0; }
         const hp = Math.max(1, Math.round(spec.hp * hpMul));
+        const atk = wave ? Math.max(1, Math.round(spec.atk * wave.atkMul)) : spec.atk;
         const shield = Math.max(0, Math.round(hp * shieldFrac));
 
         // ---- 冲锋参数 ----
         const chargeMax = spec.chargerWindup ?? DEFAULT_CHARGER_WINDUP;
         const chargeDashTime = spec.chargerDashTime ?? DEFAULT_CHARGER_DASH_TIME;
         const chargeSpeedMul = spec.chargerDashSpeedMul ?? DEFAULT_CHARGER_DASH_SPEED_MUL;
-        const chargeDmg = Math.max(1, Math.round(spec.atk * (spec.chargerHitDmgMul ?? DEFAULT_CHARGER_HIT_DMG_MUL)));
+        const chargeDmg = wave ? atk : Math.max(1, Math.round(spec.atk * (spec.chargerHitDmgMul ?? DEFAULT_CHARGER_HIT_DMG_MUL)));
 
         return {
             id: this._nextId++,
@@ -1116,16 +1246,19 @@ export class BattleWorld {
             maxHp: hp,
             alive: true,
             element: this.nextElement(),
-            atk: spec.atk,
+            atk,
             speed: spec.speed * speedMul,
             atkInterval: spec.atkInterval,
             // 初始冷却错开一点，避免整批敌人同一帧齐射
             atkCd: 0.3 + this._rng() * 0.4,
             hitFlash: 0,
-            expValue: spec.expValue,
+            expValue: wave ? spec.expValue : spec.expTotal === undefined ? spec.expValue
+                : Math.floor((slot + 1) * spec.expTotal / spec.count) - Math.floor(slot * spec.expTotal / spec.count),
+            formExpValue: wave ? spec.continuousFormExp : spec.formExpTotal === undefined ? undefined
+                : Math.floor((slot + 1) * spec.formExpTotal / spec.count) - Math.floor(slot * spec.formExpTotal / spec.count),
 
             kiteRange: spec.kiteRange ?? DEFAULT_KITE_RANGE,
-            shotAtk: spec.shotAtk ?? Math.max(1, Math.round(spec.atk * 0.72)),
+            shotAtk: wave ? atk : spec.shotAtk ?? Math.max(1, Math.round(spec.atk * 0.72)),
             shotSpeed: spec.shotSpeed ?? DEFAULT_SHOT_SPEED,
             shotInterval: spec.shotInterval ?? DEFAULT_SHOT_INTERVAL,
             shotCd: kind === 'ranged' ? 0.6 + this._rng() * 0.8 : 999,
@@ -1241,6 +1374,10 @@ export class BattleWorld {
         if (!this.player.alive) return;
 
         let dmg = Math.max(0, raw);
+        if (this._enemySpec?.waves && dmg > 0) {
+            if (this._hurtCooldown > 0) return;
+            this._hurtCooldown = .35;
+        }
 
         // 属性抗性：只减免**元素属性**那一部分伤害。
         // 减免上限 0.75 —— 不给免疫，否则全属性防具会让玩家彻底不看血条，
@@ -1295,6 +1432,10 @@ export class BattleWorld {
     // ================================================================
 
     private cleanup(): void {
+        if (this._enemySpec?.waves) {
+            for (const e of this.enemies) if (!e.alive) this._waveByEnemy.delete(e.id);
+            this.enemies = this.enemies.filter(e => e.alive);
+        }
         if (this.projectiles.length > 40) {
             this.projectiles = this.projectiles.filter((p) => p.alive);
         }
@@ -1308,6 +1449,7 @@ export class BattleWorld {
         if (!this.player.alive) return;
 
         const anyAlive = this.enemies.some((e) => e.alive);
+        if (this._enemySpec?.waves && this._waveIndex < this._enemySpec.waves.length) return;
         if (!anyAlive && this._spawnLeft <= 0) {
             this.running = false;
             this.result = 'won';

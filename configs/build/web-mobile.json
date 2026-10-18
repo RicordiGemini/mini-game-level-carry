@@ -1,0 +1,10 @@
+{
+  "platform": "web-mobile",
+  "name": "WeaponExpedition",
+  "outputName": "web-mobile",
+  "buildPath": "project://build",
+  "debug": true,
+  "startScene": "81a705b0-80df-409b-863d-fa293db4570c",
+  "scenes": [{ "url": "db://assets/scenes/Main.scene", "uuid": "81a705b0-80df-409b-863d-fa293db4570c" }],
+  "packages": { "web-mobile": { "orientation": "portrait", "embedWebDebugger": false } }
+}

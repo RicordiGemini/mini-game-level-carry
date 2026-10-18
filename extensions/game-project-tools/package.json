@@ -1,0 +1,15 @@
+{
+  "name": "game-project-tools",
+  "version": "1.0.0",
+  "package_version": 2,
+  "description": "使用当前 Cocos 引擎生成本项目启动场景和预制体",
+  "main": "./main.js",
+  "contributions": {
+    "scene": { "script": "./scene.js" },
+    "menu": [{ "path": "项目工具", "label": "补齐启动场景与预制体", "message": "generate" }],
+    "messages": {
+      "generate": { "methods": ["generate"] },
+      "inspect": { "methods": ["inspect"] }
+    }
+  }
+}

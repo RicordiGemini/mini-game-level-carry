@@ -1,0 +1,9 @@
+{
+  "general": {
+    "start_scene": "81a705b0-80df-409b-863d-fa293db4570c"
+  },
+  "preview": {
+    "showFps": false
+  },
+  "__version__": "1.0.1"
+}

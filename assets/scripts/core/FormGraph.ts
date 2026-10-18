@@ -18,6 +18,27 @@ import {
     getAllEdges, getEvolveOptions, getForm, getRootForm, getRootOf, legacyFormId, requireForm,
 } from '../data/FormConfig';
 import { getTalentDef } from '../data/TalentConfig';
+import { WEAPON_EVOLUTION_AUX, WEAPON_UPGRADES_REQUIRED } from '../data/RunConfig';
+
+export function weaponUpgradeCount(st: EquipRunState): number {
+    return Number.isFinite(st.upgrades) ? Math.max(0, Math.min(WEAPON_UPGRADES_REQUIRED, Math.floor(st.upgrades!))) : 0;
+}
+
+export function evolutionAuxIds(st: EquipRunState): string[] {
+    const form = formOfState(st);
+    return [...new Set((form.sources.length ? form.sources : [getRootOf(form.id)])
+        .map(id => WEAPON_EVOLUTION_AUX[id]).filter((id): id is string => !!id))];
+}
+
+export function hasEvolutionAux(loadout: RunLoadoutState, st: EquipRunState): boolean {
+    const required = evolutionAuxIds(st);
+    return required.length > 0 && required.every(id => loadout.auxes.some(a => getRootOf(resolveFormId(a)) === id));
+}
+
+export function weaponEvolutionHint(st: EquipRunState): string {
+    return '强化 ' + weaponUpgradeCount(st) + '/' + WEAPON_UPGRADES_REQUIRED + ' · 需要 ' +
+        (evolutionAuxIds(st).map(id => requireForm(id).name).join('、') || '配套辅助') + '（保留）';
+}
 
 /**
  * 取一个槽位当前真正的形态 id。
@@ -56,14 +77,11 @@ export function aimOf(form: FormNode): AimModeId {
 }
 
 /**
- * 一个槽位是否已经攒够经验、可以进化。
- *
- * 判定标准是"该槽的累计经验是否达到当前层级的门槛"。
- * 门槛随 depth 递增，所以越靠后的形态越难推进 ——
- * 一次进化抵得上前面好几次，这是复玩时仍有成长感的原因。
+ * 武器需要当前形态五次强化及配套辅助；辅助自身仍按培养经验进化。
  */
-export function isReadyToEvolve(st: EquipRunState): boolean {
+export function isReadyToEvolve(st: EquipRunState, loadout?: RunLoadoutState): boolean {
     const form = formOfState(st);
+    if (form.kind === 'weapon') return weaponUpgradeCount(st) >= WEAPON_UPGRADES_REQUIRED && !!loadout && hasEvolutionAux(loadout, st);
     return st.exp >= depthExpNeed(form.depth);
 }
 
@@ -101,7 +119,7 @@ export function readyEvolutions(loadout: RunLoadoutState, allowAdvanced: boolean
     const scan = (arr: EquipRunState[], kind: SlotKind): void => {
         for (let i = 0; i < arr.length; i++) {
             const st = arr[i];
-            if (!isReadyToEvolve(st)) continue;
+            if (!isReadyToEvolve(st, loadout)) continue;
             const formId = resolveFormId(st);
             for (const e of getEvolveOptions(formId, allowAdvanced)) {
                 if (e.type === 'fusion') continue;
@@ -130,7 +148,7 @@ export interface FusionMatch {
  * 三个必要条件：
  *   1. 配方可用（复玩限定配方需要 allowAdvanced）
  *   2. 两件材料都在手上
- *   3. 两件材料都已经攒够经验（合成是"进化"，不是"拼装"）
+ *   3. 两件材料各自强化五次并持有各自配套辅助
  *
  * 第 3 条容易被忽略但很重要：如果只要凑齐两件就能合成，
  * 玩家会在开局第一波就合完，后面半局没有任何成长。
@@ -145,8 +163,8 @@ export function findFusions(loadout: RunLoadoutState, allowAdvanced: boolean): F
         const ia = ids.indexOf(r.a);
         const ib = ids.indexOf(r.b);
         if (ia < 0 || ib < 0 || ia === ib) continue;
-        if (!isReadyToEvolve(loadout.weapons[ia])) continue;
-        if (!isReadyToEvolve(loadout.weapons[ib])) continue;
+        if (!isReadyToEvolve(loadout.weapons[ia], loadout)) continue;
+        if (!isReadyToEvolve(loadout.weapons[ib], loadout)) continue;
         out.push({ recipe: r, indexA: ia, indexB: ib });
     }
     return out;

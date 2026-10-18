@@ -33,6 +33,8 @@ import { getDifficulty, RANGED_RATIO_MAX } from './DifficultyConfig';
 import { elementsForLevel, ElementId } from './ElementConfig';
 import { affinityForLevel, formationForLevel, weakForLevel } from './LevelAffinity';
 import { legacyFormId, requireForm } from './FormConfig';
+import { experienceBudgetFor, CONTINUOUS_FORM_EXP } from './RunConfig';
+import { encounterFor } from './EncounterConfig';
 
 /** 可被继承的数值白名单：不在表里的字段永远不进档案 */
 export const CARRY_WHITELIST: string[] = [
@@ -49,9 +51,9 @@ export const DIFFICULTY_EASE = 1.0;
 /** 关卡间难度增长：10% 平缓递增 */
 export const LEVEL_GROWTH = 0.10;
 
-/** 第 1 关的敌人基准血量 / 攻击 */
-const BASE_ENEMY_HP = 55;
-const BASE_ENEMY_ATK = 6;
+/** 密集持续波次的第 1 关杂兵基准生命与攻击。 */
+const BASE_ENEMY_HP = 12;
+const BASE_ENEMY_ATK = 1;
 
 /**
  * 敌人基准移速（像素/秒）。
@@ -91,13 +93,6 @@ const RANGED_SHOT_ATK_MUL = 0.72;
 function levelRangedBonus(levelId: number): number {
     if (levelId <= 2) return 0;
     return Math.min(0.03, (levelId - 2) * 0.0025);
-}
-
-/** 每只敌人提供的经验：随关卡与难度小幅增长，保证一局内能看到进化 */
-function expPerEnemy(levelId: number, diff: DifficultyDef): number {
-    const base = 30 + levelId * 2;
-    // 高难度怪更肉、打得更久，经验给一点补偿，避免"打完一局还没进化"
-    return Math.round(base * (1 + (diff.tier - 1) * 0.25));
 }
 
 /** 通关发放的永久金币（用于局外升级装备），已乘难度倍率 */
@@ -141,14 +136,14 @@ export function getLevelConfig(levelId: number, difficulty = 1, replayBoost = 0)
     const baseEnemyAtk = BASE_ENEMY_ATK * levelScale;
 
     // 敌人数量：关卡成长 × 难度倍率（复玩加难只加数量的一半权重，避免变成纯人海）
-    const enemies = Math.max(3, Math.round(
-        (4 + Math.floor(levelId / 2)) * diff.countMul * (1 + boost * 0.5)
-    ));
+    const encounter = encounterFor(levelId, diff.countMul, boost);
+    const { enemies } = encounter;
+    const experience = experienceBudgetFor(enemies, diff.tier, true);
 
     // 远程怪比例：难度基础值 + 关卡进度增量 + 复玩加难，全部收敛到 RANGED_RATIO_MAX。
     // 噩梦基础 0.42 + 关卡最多 +3 + 复玩最多 +6 = 0.51 > 0.45 → 收敛到 0.45（封顶）。
     // 普通 / 困难 加完所有也到不了 0.45，符合"只有噩梦难度远程 42%+"。
-    const rangedRatio = Math.min(
+    const rangedRatio = levelId <= 2 && diff.tier === 1 ? 0 : Math.min(
         RANGED_RATIO_MAX,
         diff.rangedRatio + levelRangedBonus(levelId) + boost * 0.06
     );
@@ -171,9 +166,13 @@ export function getLevelConfig(levelId: number, difficulty = 1, replayBoost = 0)
         affinityWeaponIds: affinityForLevel(levelId),
         weakWeaponIds: weakForLevel(levelId),
         enemies,
-        baseEnemyHp: Math.round(BASE_ENEMY_HP * levelScale * diff.hpMul * boostMul),
-        baseEnemyAtk: Math.round(baseEnemyAtk * diff.atkMul * boostMul),
-        expPerEnemy: expPerEnemy(levelId, diff),
+        waves: encounter.waves,
+        maxAlive: encounter.maxAlive,
+        baseEnemyHp: Math.max(1, Math.round(BASE_ENEMY_HP * levelScale * diff.hpMul * boostMul)),
+        baseEnemyAtk: Math.max(1, Math.round(baseEnemyAtk * diff.atkMul * boostMul)),
+        // 平均值用于展示；运行时按出生序号分配整数余数。
+        expPerEnemy: experience.totalExp / enemies,
+        experience,
         goldReward: Math.round(goldReward(levelId, diff) * (1 + boost * 0.8)),
         reward: {
             coin: Math.round(60 * levelScale * diff.goldMul * (1 + boost * 0.8)),
@@ -189,9 +188,9 @@ export function getLevelConfig(levelId: number, difficulty = 1, replayBoost = 0)
         enemySpeed: Math.round(BASE_ENEMY_SPEED * (1 + (levelScale - 1) * 0.35) * diff.speedMul),
         enemyAtkInterval: BASE_ENEMY_ATK_INTERVAL,
         enemyRadius: BASE_ENEMY_RADIUS,
-        // 分 3 波投放，避免一开局就被全场围殴
-        batchSize: Math.max(2, Math.ceil(enemies / 3)),
-        batchInterval: 3.2,
+        // 每波 30 秒，波内每秒补怪，至少三波。
+        batchSize: encounter.batchSize,
+        batchInterval: encounter.batchInterval,
 
         // ---- 远程怪参数 ----
         rangedRatio,
@@ -221,6 +220,9 @@ export function hasNextLevel(levelId: number): boolean {
  */
 export function buildEnemySpawnSpec(cfg: LevelConfigItem): EnemySpawnSpec {
     return {
+        waves: cfg.waves,
+        maxAlive: cfg.maxAlive,
+        continuousFormExp: cfg.waves ? CONTINUOUS_FORM_EXP : undefined,
         count: cfg.enemies,
         hp: cfg.baseEnemyHp,
         atk: cfg.baseEnemyAtk,
@@ -228,6 +230,8 @@ export function buildEnemySpawnSpec(cfg: LevelConfigItem): EnemySpawnSpec {
         radius: cfg.enemyRadius,
         atkInterval: cfg.enemyAtkInterval,
         expValue: cfg.expPerEnemy,
+        expTotal: cfg.experience?.totalExp,
+        formExpTotal: cfg.experience?.totalFormExp,
         batchSize: cfg.batchSize,
         batchInterval: cfg.batchInterval,
 
@@ -299,6 +303,8 @@ export function buildLoadout(state: LevelState): {
             kind,
             stage: Math.max(0, depth),
             exp: Math.max(0, Math.floor(st.exp)),
+            upgrades: kind === 'weapon' ? st.upgrades : undefined,
+            evolvedUpgradeAtkPct: kind === 'weapon' ? st.evolvedUpgradeAtkPct : undefined,
         });
     };
 

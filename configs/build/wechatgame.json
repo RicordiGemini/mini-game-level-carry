@@ -1,0 +1,12 @@
+{
+  "platform": "wechatgame",
+  "name": "WeaponExpedition",
+  "outputName": "wechatgame",
+  "buildPath": "project://build",
+  "debug": true,
+  "startScene": "81a705b0-80df-409b-863d-fa293db4570c",
+  "scenes": [{ "url": "db://assets/scenes/Main.scene", "uuid": "81a705b0-80df-409b-863d-fa293db4570c" }],
+  "packages": {
+    "wechatgame": { "appid": "", "orientation": "portrait", "buildOpenDataContextTemplate": false, "separateEngine": false, "wasmSubpackage": false }
+  }
+}

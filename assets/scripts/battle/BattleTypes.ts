@@ -196,6 +196,8 @@ export interface EnemyState extends Actor {
     hitFlash: number;
     /** 击杀后交给关卡流程的经验值 */
     expValue: number;
+    /** 独立装备培养经验；未配置时与角色经验相同。 */
+    formExpValue?: number;
 
     // ---- 仅远程怪有效 ----
     /** 试图保持的间距：小于它会后撤，大于它会靠近 */
@@ -463,7 +465,29 @@ export interface AimResult {
 // ====================================================================
 
 /** 敌人的生成参数 */
+export interface TimedWaveSpec {
+    duration: number;
+    spawnInterval: number;
+    spawnCount: number;
+    hpMul: number;
+    atkMul: number;
+}
+
+/** 存活敌人恢复时重建满血，不是完整战场快照。 */
+export interface WaveProgress {
+    version: 1;
+    elapsed: number;
+    waveIndex: number;
+    waveElapsed: number;
+    spawnTimer: number;
+    nextId: number;
+    alive: { id: number; waveIndex: number }[];
+}
+
 export interface EnemySpawnSpec {
+    waves?: TimedWaveSpec[];
+    maxAlive?: number;
+    continuousFormExp?: number;
     count: number;
     hp: number;
     atk: number;
@@ -471,6 +495,9 @@ export interface EnemySpawnSpec {
     radius: number;
     atkInterval: number;
     expValue: number;
+    /** 整关整数预算，按出生顺序均匀分余数；未提供时沿用 expValue。 */
+    expTotal?: number;
+    formExpTotal?: number;
     /** 每批生成数量 */
     batchSize: number;
     /** 批次间隔秒数 */
@@ -571,6 +598,9 @@ export interface BattleSetup {
     weapons: WeaponSpec[];
     /** 敌人生成参数 */
     enemy: EnemySpawnSpec;
+    /** 续玩重建战场时不再次生成已结算的敌人。 */
+    killedEnemyIds?: number[];
+    waveProgress?: WaveProgress;
     /** 随机种子，固定后战斗过程可复现（写测试用） */
     seed?: number;
 
@@ -594,6 +624,17 @@ export interface BattleSetup {
      * 0 = 正常吃克制，0.9 = 几乎完全无视。
      */
     counterBreak?: number;
+}
+
+/** 局内成长后的玩家属性快照；同步时保留已损失生命和已消耗护盾。 */
+export interface PlayerCombatSpec {
+    maxHp: number;
+    speed: number;
+    shield: number;
+    thorns: number;
+    resist: Record<string, number>;
+    pierceResist: number;
+    counterBreak: number;
 }
 
 /** 战斗结束的原因 */

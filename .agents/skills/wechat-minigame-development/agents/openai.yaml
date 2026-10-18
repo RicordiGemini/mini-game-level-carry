@@ -1,0 +1,6 @@
+interface:
+  display_name: "微信小游戏全流程开发"
+  short_description: "基于现有 Cocos 工程与微信官方文档，完成小游戏开发、验证及发布准备"
+  default_prompt: "使用 $wechat-minigame-development，根据我的需求和微信小游戏官方文档，在当前项目中完成开发与验证。"
+policy:
+  allow_implicit_invocation: true

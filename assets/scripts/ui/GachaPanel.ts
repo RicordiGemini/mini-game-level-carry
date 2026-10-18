@@ -157,6 +157,10 @@ export class GachaPanel extends Component {
         TutorialLayer.showTipById('tip_gacha');
     }
 
+    public openFromMenu(): void {
+        this.open('weapon');
+    }
+
     public close(): void {
         this.node.active = false;
     }

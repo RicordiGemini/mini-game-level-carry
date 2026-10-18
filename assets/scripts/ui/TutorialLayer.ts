@@ -18,7 +18,7 @@
 
 import {
     _decorator, Color, Component, EventTouch, Graphics, HorizontalTextAlignment, Label,
-    Node, UITransform, VerticalTextAlignment, view, Widget, find, director,
+    Node, UITransform, VerticalTextAlignment, view, Widget, find, director, Layers,
 } from 'cc';
 import { TutorialManager } from '../core/TutorialManager';
 import { NEWBIE_KEY, NEWBIE_STEPS, TutorialStep, TutorialTip } from '../data/TutorialConfig';
@@ -77,6 +77,7 @@ export class TutorialLayer extends Component {
         if (TutorialLayer.instance && TutorialLayer.instance.isValid) return TutorialLayer.instance;
 
         const node = new Node('TutorialLayer');
+        node.layer = Layers.Enum.UI_2D;
         const size = view.getVisibleSize();
 
         const ut = node.addComponent(UITransform)!;
@@ -128,6 +129,7 @@ export class TutorialLayer extends Component {
 
         // 遮罩（全屏半透明）
         this.mask = new Node('Mask');
+        this.mask.layer = Layers.Enum.UI_2D;
         this.mask.addComponent(UITransform)!.setContentSize(sw, sh);
         const mg = this.mask.addComponent(Graphics)!;
         mg.fillColor = MASK_BG;
@@ -138,6 +140,7 @@ export class TutorialLayer extends Component {
 
         // 卡片
         this.card = new Node('Card');
+        this.card.layer = Layers.Enum.UI_2D;
         const cardW = Math.min(sw * 0.86, 620);
         const cardH = 380;
         this.card.addComponent(UITransform)!.setContentSize(cardW, cardH);
@@ -162,13 +165,14 @@ export class TutorialLayer extends Component {
         // 正文
         this.bodyLabel = this.makeLabel('Body', cardW - 60, 200, 20,
             BODY_COLOR, HorizontalTextAlignment.CENTER, VerticalTextAlignment.CENTER);
-        this.bodyLabel.enableWrap = true;
+        this.bodyLabel.enableWrapText = true;
         this.bodyLabel.overflow = Label.Overflow.CLAMP;
         this.bodyLabel.node.setPosition(0, 6, 0);
         this.bodyLabel.node.setParent(this.card);
 
         // 按钮（视觉，主操作由根节点点击触发）
         const btn = new Node('Btn');
+        btn.layer = Layers.Enum.UI_2D;
         btn.addComponent(UITransform)!.setContentSize(240, 60);
         const bg = btn.addComponent(Graphics)!;
         bg.fillColor = BTN_BG;
@@ -203,6 +207,7 @@ export class TutorialLayer extends Component {
         halign: HorizontalTextAlignment, valign: VerticalTextAlignment,
     ): Label {
         const n = new Node(name);
+        n.layer = Layers.Enum.UI_2D;
         n.addComponent(UITransform)!.setContentSize(w, h);
         const l = n.addComponent(Label)!;
         l.string = '';

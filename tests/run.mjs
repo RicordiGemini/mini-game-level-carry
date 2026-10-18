@@ -37,4 +37,4 @@ for (const f of files) {
   // 套件内部已report 并 exit(0)，正常情况下这里不会重复处理
 }
 
-process.exit(failedSuites > 0 ? 1 : 0);
+process.exit(failedSuites > 0 || process.exitCode ? 1 : 0);

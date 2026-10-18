@@ -18,3 +18,10 @@ Thumbs.db
 
 # 测试编译产物
 /.test-build/
+
+# Cocos 本机服务配置和无项目行为的编辑器状态
+/settings/v2/packages/cocos-service.json
+/settings/v2/packages/information.json
+/settings/v2/packages/device.json
+/settings/v2/packages/program.json
+/settings/v2/packages/builder.json

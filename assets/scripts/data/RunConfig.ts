@@ -38,9 +38,32 @@ export const REWARD_CHOICES = 3;
 /** 主类别每轮出几张卡 */
 export const FOCUS_TAKE = 2;
 
-/** 关卡等级经验的起点与增长率 */
+/** 关卡等级门槛：线性递增，避免后半局选卡间隔指数拉长。 */
 export const LEVEL_EXP_BASE = 70;
-export const LEVEL_EXP_GROWTH = 1.30;
+export const LEVEL_EXP_STEP = 20;
+
+/** 密集定时波次的单杀经验，首关无加成全击杀约 14 次升级。 */
+export const CONTINUOUS_ROLE_EXP = 2;
+export const CONTINUOUS_FORM_EXP = 3;
+
+export const WEAPON_UPGRADES_REQUIRED = 5;
+export const WEAPON_UPGRADE_ATK_PCT = 0.15;
+/** 按武器根配对；进阶辅助仍视为同一条辅助线，进化不消耗辅助。 */
+export const WEAPON_EVOLUTION_AUX: Record<string, string> = {
+    blade: 'aux_blood', bow: 'aux_scope', orb: 'aux_tome', spear: 'aux_scope',
+    hammer: 'aux_thorn', dagger: 'aux_greaves', staff: 'aux_hourglass', scythe: 'aux_blood',
+    cannon: 'aux_repeater', shuriken: 'aux_repeater', lance: 'aux_aegis', wheel: 'aux_hourglass',
+    star_blade: 'aux_astralring', frost_lance: 'aux_aegis', storm_bow: 'aux_repeater',
+    quake_hammer: 'aux_thorn', void_cannon: 'aux_abysseye', radiant_wheel: 'aux_chronogear',
+};
+
+/** 每四只敌人约一次升级，普通最多十次；困难/噩梦各多一/两次。 */
+export const ENEMIES_PER_LEVEL_UP = 4;
+export const NORMAL_LEVEL_UP_CAP = 10;
+/** 通关时保留下一等级 65% 的进度，使小关的最后一张基础升级卡也出现在清场前。 */
+export const END_EXP_PROGRESS = 0.65;
+/** 装备培养最低预算，使初始武器在新手第一张升级卡时可进化。 */
+export const MIN_FORM_EXP_BUDGET = 1200;
 
 /** 一局内等级上限（防止极端情况下的无限循环） */
 export const MAX_RUN_LEVEL = 60;
@@ -58,7 +81,38 @@ export function auxSlotCap(replay: boolean): number {
 /** 从 level 升到 level+1 需要的经验 */
 export function levelExpFor(level: number): number {
     const l = Math.max(1, Math.min(MAX_RUN_LEVEL, Math.floor(level)));
-    return Math.round(LEVEL_EXP_BASE * Math.pow(LEVEL_EXP_GROWTH, l - 1));
+    return LEVEL_EXP_BASE + LEVEL_EXP_STEP * (l - 1);
+}
+
+/** 新局、无经验加成时的整关经验预算。难度/加难造成的敌人数变化在此归一化。 */
+export function experienceBudgetFor(enemyCount: number, difficulty: number, continuous = false): {
+    targetLevelUps: number; totalExp: number; totalFormExp: number;
+} {
+    const count = Math.max(1, Math.floor(enemyCount));
+    if (continuous) {
+        const totalExp = count * CONTINUOUS_ROLE_EXP;
+        let need = 0, targetLevelUps = 0;
+        while (targetLevelUps < MAX_RUN_LEVEL - 1 && need + levelExpFor(targetLevelUps + 1) <= totalExp) {
+            need += levelExpFor(++targetLevelUps);
+        }
+        return { targetLevelUps, totalExp, totalFormExp: count * CONTINUOUS_FORM_EXP };
+    }
+    const tier = Math.max(1, Math.min(3, Math.floor(difficulty)));
+    const targetLevelUps = Math.min(
+        Math.max(1, Math.floor(count / ENEMIES_PER_LEVEL_UP)) + tier - 1,
+        NORMAL_LEVEL_UP_CAP + tier - 1,
+    );
+    let totalExp = 0;
+    for (let level = 1; level <= targetLevelUps; level++) totalExp += levelExpFor(level);
+    totalExp += Math.round(levelExpFor(targetLevelUps + 1) * END_EXP_PROGRESS);
+    return { targetLevelUps, totalExp, totalFormExp: Math.max(MIN_FORM_EXP_BUDGET, totalExp) };
+}
+
+/** 按敌人出生序号分配整数经验，余数均匀分散，整关恰好等于预算。 */
+export function experienceShare(total: number, count: number, index: number): number {
+    const n = Math.max(1, Math.floor(count));
+    const i = Math.max(0, Math.min(n - 1, Math.floor(index)));
+    return Math.floor((i + 1) * total / n) - Math.floor(i * total / n);
 }
 
 // ====================================================================

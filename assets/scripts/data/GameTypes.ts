@@ -511,6 +511,10 @@ export interface EquipRunState {
     stage: number;
     /** 本关内累计经验 */
     exp: number;
+    /** 当前武器形态已通过选卡强化的次数，0~5；旧档缺省 0。 */
+    upgrades?: number;
+    /** 已完成形态的强化攻击加成，进化后保留。 */
+    evolvedUpgradeAtkPct?: number;
 }
 
 /** 一次进化事件，用于播放特效与飘字 */
@@ -541,6 +545,7 @@ export interface EvolutionEvent {
  */
 export type RewardKind =
     | 'weapon_new'
+    | 'weapon_upgrade'
     | 'weapon_evolve'
     | 'weapon_fusion'
     | 'aux_new'
@@ -593,6 +598,14 @@ export interface RunLoadoutState {
     pendingPicks: number;
     /** 当前待选的三张卡（为空表示没有待选） */
     pending: RewardOption[];
+    /** 尚未领取的升级奖励，含当前面板；按达到的等级依次领取。旧档缺省为空。 */
+    pendingLevelUps?: number[];
+    /** 已生成的选卡次数，续玩时保持随机序列。 */
+    rewardSequence?: number;
+    /** 2=按整关预算投放的线性升级曲线；旧档未填时在续玩入口转换等级内进度。 */
+    expCurveVersion?: number;
+    /** 1=武器五次强化与配套辅助进化规则；旧面板在续玩时重建。 */
+    weaponUpgradeVersion?: number;
 }
 
 /** 计算后的最终战力，战斗逻辑只读这个 */
@@ -1191,6 +1204,7 @@ export interface LevelArchive {
 
 /** 单局运行态 */
 export interface LevelState {
+    waveProgress?: import('../battle/BattleTypes').WaveProgress;
     levelId: number;
     /** 本次开局选择的难度层级 */
     difficulty: number;
@@ -1211,6 +1225,14 @@ export interface LevelState {
     /** 击杀数 */
     kills: number;
     cleared: boolean;
+    /** 当前战斗已结算的敌人 ID；续玩重建战场时跳过，重试开始新战斗时清空。 */
+    killedEnemyIds?: number[];
+      /** 本局生命周期内已经发放过奖励的敌人 ID；战败重试不清空，防止重复刷经验/资源。 */
+      rewardedEnemyIds?: number[];
+    /** 玩家尚未处理战败选项；重启后显示战败面板而不是静默进入战斗。 */
+    defeatPending?: boolean;
+    /** 敌人已清空，等待领取升级/合成奖励后再结算。 */
+    battleCleared?: boolean;
     /** 本次开局是否继承了装备 */
     carried: boolean;
     /**
@@ -1225,6 +1247,8 @@ export interface LevelState {
 
 /** 关卡配置（策划表一行，已按难度缩放） */
 export interface LevelConfigItem {
+    waves?: import('../battle/BattleTypes').TimedWaveSpec[];
+    maxAlive?: number;
     levelId: number;
     /** 本次配置对应的难度层级 */
     difficulty: number;
@@ -1248,6 +1272,8 @@ export interface LevelConfigItem {
     baseEnemyAtk: number;
     /** 每只敌人提供的经验值 */
     expPerEnemy: number;
+    /** 基础经验预算（无加成、无重试）；旧配置未提供时沿用 expPerEnemy。 */
+    experience?: { targetLevelUps: number; totalExp: number; totalFormExp: number };
     /** 通关后发放的永久金币，用于局外升级装备（已乘难度倍率） */
     goldReward: number;
     reward: AttrMap;

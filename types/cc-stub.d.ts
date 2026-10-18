@@ -20,6 +20,10 @@
 
 declare module 'cc' {
   export const _decorator: any;
+  export const Layers: any;
+  export class Tween {
+    static stopAllByTarget(target: any): void;
+  }
 
   export class Component {
     node: any;

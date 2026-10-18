@@ -3,8 +3,17 @@
   "version": "0.1.0",
   "description": "武器收集 Roguelite 微信小游戏（Cocos Creator 3.8 + TypeScript）",
   "private": true,
+  "uuid": "20c2c706-fb44-44d8-999e-e03aaaf19cb3",
+  "type": "2d",
+  "creator": {
+    "version": "3.8.8"
+  },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "assets:check": "node tools/asset-meta.mjs",
+    "assets:sync": "node tools/asset-meta.mjs --write",
+    "test:assets": "node tests/asset-meta.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.logic.json",
+    "typecheck:cocos": "tsc --noEmit -p tsconfig.json",
     "build:test": "node tools/build-tests.mjs",
     "test": "npm run build:test && node tests/run.mjs",
     "calibrate": "npm run build:test && node tools/calibrate.mjs"

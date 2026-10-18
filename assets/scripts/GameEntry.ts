@@ -34,24 +34,24 @@
  * 三处都由 LevelFlow 在通关时统一触发，入口层只负责把 cfg 传给战斗层。
  */
 
-import { _decorator, Component, Label, Node, Vec3, tween } from 'cc';
-import { LevelFlow } from './core/LevelFlow';
+import { _decorator, Component, Label, Node, Vec3, Tween, tween } from 'cc';
+import { LevelFlow, SettlePayload } from './core/LevelFlow';
 import { EquipmentManager, getMaxEquipped } from './core/EquipmentManager';
 import { SaveManager } from './core/SaveManager';
 import { AdReward } from './ad/AdReward';
 import {
     CombatPower, ElementId, EquipRunState, EvolutionEvent, LevelConfigItem, LevelState,
 } from './data/GameTypes';
-import { auxSlotCap, weaponSlotCap } from './data/RunConfig';
+import { auxSlotCap, weaponSlotCap, levelExpFor, MAX_RUN_LEVEL } from './data/RunConfig';
 import { getTalentDef } from './data/TalentConfig';
-import { expToEvolve } from './core/FormGraph';
+import { expToEvolve, readyEvolutions } from './core/FormGraph';
 import { armorCounterBreak, currentResist, grantStoneByAd, maxCounterBreak } from './core/ForgeManager';
 import {
     elementDamageMul, levelElementText, levelElementDesc, elementsForLevel,
     ELEMENT_IDS, getElementDef,
 } from './data/ElementConfig';
 import { setElementResolver } from './battle/BattleWorld';
-import { WeaponSpec } from './battle/BattleTypes';
+import { WeaponSpec, PLAYER_SPEED } from './battle/BattleTypes';
 import { TutorialLayer } from './ui/TutorialLayer';
 import { TutorialManager } from './core/TutorialManager';
 import { LevelSelectPanel } from './ui/LevelSelectPanel';
@@ -62,11 +62,10 @@ import { TreePanel } from './ui/TreePanel';
 import { AchievementPanel } from './ui/AchievementPanel';
 import { ForgePanel } from './ui/ForgePanel';
 import { CounterPanel } from './ui/CounterPanel';
+import { GachaPanel } from './ui/GachaPanel';
+import { DefeatPanel } from './ui/DefeatPanel';
 
 const { ccclass, property } = _decorator;
-
-/** 战败后自动重开的等待秒数 */
-const DEFEAT_RETRY_DELAY = 2.2;
 
 @ccclass('GameEntry')
 export class GameEntry extends Component {
@@ -90,17 +89,17 @@ export class GameEntry extends Component {
     @property(Node) achievementPanel: Node = null!;
     /** 锻造面板（突破 / 镶嵌 / 碎片合成 / 防具，主界面手动打开） */
     @property(Node) forgePanel: Node = null!;
+    /** 许愿面板（主界面手动打开） */
+    @property(Node) gachaPanel: Node = null!;
     /** 属性克制面板（对局角落常驻，24 种属性下是必需品） */
     @property(Node) counterPanel: Node = null!;
 
     /** 本局开打时的战力快照，HUD 展示用 */
     private _power: CombatPower | null = null;
-    /** 战败后的重开倒计时 */
-    private _retryTimer = 0;
     /** 防止通关/战败回调重复触发 */
     private _settling = false;
 
-    onLoad(): void {
+    start(): void {
         // 0. 把属性克制规则注入战斗层。
         //    战斗层不认识属性表（它只认字符串 key），
         //    注入之后属性克制才真正生效；不注入时战斗层返回 ×1。
@@ -114,9 +113,17 @@ export class GameEntry extends Component {
         // 2. 订阅流程事件
         LevelFlow.inst.onStart((state, cfg) => this.onLevelStart(state, cfg));
         LevelFlow.inst.onEvolve((events) => this.onEvolve(events));
+        LevelFlow.inst.onLoadoutChanged(() => this.syncCombatLoadout());
+        LevelFlow.inst.onSettle((payload) => this.onLevelSettled(payload));
+        LevelFlow.inst.onDefeat((payload) => {
+            DefeatPanel.ensure(this.node.parent || this.node).show(payload);
+            this.syncLayerByPhase();
+        });
+        DefeatPanel.ensure(this.node.parent || this.node);
 
         // 3. 启动：校准装备 → 续玩未打完的单局 / 进入关卡选择
         LevelFlow.inst.boot();
+        this.positionPanelCloseButtons();
         this.syncLayerByPhase();
 
         // 第十轮：首次进入游戏播放新手引导（已看过则跳过）。
@@ -154,6 +161,7 @@ export class GameEntry extends Component {
         if (this.resultPanel) this.resultPanel.active = phase === 'SETTLE';
         if (this.rewardPanel) this.rewardPanel.active = phase === 'REWARD';
         if (this.replayPanel) this.replayPanel.active = phase === 'REPLAY_BOOST';
+        if (DefeatPanel.instance) DefeatPanel.instance.node.active = phase === 'DEFEAT';
 
         // 图鉴 / 成就属于"主界面工具"，只有在关卡选择、难度选择、备战这几个
         // 非战斗阶段才有意义。一旦进入战斗或结算，就把它们收起来，
@@ -175,7 +183,6 @@ export class GameEntry extends Component {
 
     private onLevelStart(state: LevelState, cfg: LevelConfigItem): void {
         this._settling = false;
-        this._retryTimer = 0;
         this._power = LevelFlow.inst.getCombatPower();
 
         const carryText = state.carrySource === 'archive' ? '（看广告继承该难度档案）' :
@@ -198,10 +205,10 @@ export class GameEntry extends Component {
             const mod = LevelFlow.inst.getModifier();
             const weapons = EquipmentManager.buildWeapons(
                 state.loadout, state.stats, mod, LevelFlow.inst.getAffinityMul());
-            const hp = state.stats['hp'] ?? 100;
+            const hp = (state.stats['hp'] ?? 100) + mod.maxHpFlat;
 
             this.battle.begin(cfg, weapons, hp, {
-                onEnemyKilled: () => this.onEnemyKilled(),
+                onEnemyKilled: (enemyId, expValue, formExpValue) => this.onEnemyKilled(enemyId, expValue, formExpValue),
                 onCleared: () => this.onBattleWin(),
                 onDefeat: () => this.onBattleLost(),
                 onPlayerHurt: (dmg) => LevelFlow.inst.notePlayerHurt(dmg),
@@ -209,6 +216,9 @@ export class GameEntry extends Component {
                 // 护盾 / 荆棘是玩家侧属性，走 setup 而不是武器表 ——
                 // 它们是"玩家被打时生效"的，挂在武器上会在合成时丢失
                 shield: mod.shield,
+                playerSpeed: PLAYER_SPEED * (1 + mod.moveSpeedPct),
+                killedEnemyIds: state.killedEnemyIds,
+                waveProgress: state.waveProgress,
                 thorns: mod.thorns,
                 // 属性抗性同理：防具是局外穿戴的，不进 buildWeapons
                 resist: currentResist(),
@@ -238,8 +248,30 @@ export class GameEntry extends Component {
      * 加分 / 掉资源 / 涨经验 / 推进化全部由 LevelFlow 处理，战斗层不管这些。
      * 若触发了进化，onEvolve 回调会负责表现与同步。
      */
-    private onEnemyKilled(): void {
-        LevelFlow.inst.onEnemyKilled();
+    private onEnemyKilled(enemyId: number, expValue: number, formExpValue?: number): void {
+        LevelFlow.inst.onEnemyKilled(enemyId, expValue, formExpValue);
+    }
+
+    /** 所有选卡与击杀成长共用此入口，冷却、生命损失和护盾消耗保留。 */
+    private syncCombatLoadout(): void {
+        const flow = LevelFlow.inst;
+        const state = flow.current;
+        if (!state || !this.battle) return;
+        const mod = flow.getModifier();
+        const weapons = EquipmentManager.buildWeapons(state.loadout, state.stats, mod, flow.getAffinityMul());
+        this.battle.syncWeapons(weapons);
+        this.battle.world.syncPlayerStats({
+            maxHp: (state.stats['hp'] ?? 100) + mod.maxHpFlat,
+            speed: PLAYER_SPEED * (1 + mod.moveSpeedPct),
+            shield: mod.shield,
+            thorns: mod.thorns,
+            resist: currentResist(),
+            pierceResist: mod.pierceResist,
+            counterBreak: maxCounterBreak(weapons.map((w) => w.equipId).filter((id) => !!id)),
+        });
+        this._power = flow.getCombatPower();
+        this.updateCounterPanel(state.levelId, weapons);
+        this.refreshHud();
     }
 
     private onBattleWin(): void {
@@ -247,16 +279,19 @@ export class GameEntry extends Component {
         this._settling = true;
         this.reportElementStats();
 
-        const p = LevelFlow.inst.onLevelClear();
-        if (p) {
-            console.log('[Game] 第 ' + p.levelId + ' 关 · ' + p.difficultyName + ' 通关，得分 ' + p.score +
-                '，耗时 ' + p.elapsed.toFixed(1) + 's，金币 +' + p.goldGained +
-                '，档案已写入');
-            if (p.tierJustUnlocked) {
-                console.log('[Game] 解锁第 ' + p.levelId + ' 关难度 ' + p.nextTier +
-                    '，全局最高难度 ' + LevelFlow.inst.globalMaxTier +
-                    '，出战槽位 ' + EquipmentManager.getEquippedIds().length + ' 件已就绪');
-            }
+        LevelFlow.inst.onLevelClear();
+        this.syncLayerByPhase();
+    }
+
+    private onLevelSettled(p: SettlePayload): void {
+        this._settling = true;
+        console.log('[Game] 第 ' + p.levelId + ' 关 · ' + p.difficultyName + ' 通关，得分 ' + p.score +
+            '，耗时 ' + p.elapsed.toFixed(1) + 's，金币 +' + p.goldGained +
+            '，档案已写入');
+        if (p.tierJustUnlocked) {
+            console.log('[Game] 解锁第 ' + p.levelId + ' 关难度 ' + p.nextTier +
+                '，全局最高难度 ' + LevelFlow.inst.globalMaxTier +
+                '，出战槽位 ' + EquipmentManager.getEquippedIds().length + ' 件已就绪');
         }
         this.syncLayerByPhase();
 
@@ -265,9 +300,8 @@ export class GameEntry extends Component {
     }
 
     /**
-     * 战败。
-     * 走位玩法里战败基本等于"操作失误"，不该有任何惩罚，
-     * 给一个提示后自动重开本关，本关数据与进化进度全部保留。
+     * 战败：先持久化并弹出选择面板，不自动替玩家重开。
+     * 本局成长仍保留，永久奖励要等通关后才入账。
      */
     private onBattleLost(): void {
         if (this._settling) return;
@@ -275,9 +309,10 @@ export class GameEntry extends Component {
         // 战败也要上报：属性抗性减免了多少伤害是"已经赚到的"，
         // 不该因为这一局输了就不算数
         this.reportElementStats();
-        console.log('[Game] 战败，' + DEFEAT_RETRY_DELAY + 's 后重开本关（数据保留）');
-        this.showToast('被击倒了\n马上重来 · 本关数据保留');
-        this._retryTimer = DEFEAT_RETRY_DELAY;
+        console.log('[Game] 战败，等待玩家选择复活、重试或返回关卡选择');
+        this.showToast('被击倒了');
+        LevelFlow.inst.markDefeat();
+        this.syncLayerByPhase();
     }
 
     /**
@@ -327,12 +362,6 @@ export class GameEntry extends Component {
         // 第十轮：首次进化时解释「进化」这条成长线
         TutorialLayer.showTipById('tip_evolve');
 
-        const state = LevelFlow.inst.current;
-        if (state && this.battle) {
-            const mod = LevelFlow.inst.getModifier();
-            this.battle.syncWeapons(EquipmentManager.buildWeapons(
-                state.loadout, state.stats, mod, LevelFlow.inst.getAffinityMul()));
-        }
         this._power = LevelFlow.inst.getCombatPower();
         this.refreshHud();
 
@@ -358,7 +387,7 @@ export class GameEntry extends Component {
         this.evolveToast.string = msg;
 
         this.evolveToast.node.setScale(new Vec3(0.7, 0.7, 1));
-        this.evolveToast.node.stopAllActions();
+        Tween.stopAllByTarget(this.evolveToast.node);
         tween(this.evolveToast.node)
             .to(0.18, { scale: new Vec3(1.1, 1.1, 1) })
             .to(0.12, { scale: new Vec3(1, 1, 1) })
@@ -376,27 +405,19 @@ export class GameEntry extends Component {
     update(dt: number): void {
         const phase = LevelFlow.inst.phase;
 
+        // 阶段可能在上一帧的按钮回调中已经改变（例如三选一选卡后
+        // REWARD -> PLAYING）。先统一同步一次节点显隐，再决定本帧是否
+        // 推进战斗，避免奖励面板残留在屏幕上而战斗已经恢复。
+        this.syncLayerByPhase();
+
         // 三选一 / 复玩加难面板打开时，战斗必须真的停住 ——
         // 只是"不画"而继续推进世界，会让玩家在选卡时被围殴致死
         if (phase === 'REWARD' || phase === 'REPLAY_BOOST') {
-            this.syncLayerByPhase();
             return;
         }
 
         if (phase !== 'PLAYING') {
-            this.syncLayerByPhase();
             return;
-        }
-
-        // 战败倒计时
-        if (this._retryTimer > 0) {
-            this._retryTimer -= dt;
-            if (this._retryTimer <= 0) {
-                this._retryTimer = 0;
-                this.hideToast();
-                LevelFlow.inst.retryLevel();
-                return;
-            }
         }
 
         LevelFlow.inst.addElapsed(dt);
@@ -404,7 +425,9 @@ export class GameEntry extends Component {
         // 战斗推进交给战斗层，入口只负责驱动与刷新 HUD
         if (this.battle) {
             this.battle.tick(dt);
+            LevelFlow.inst.noteWaveProgress(this.battle.world?.waveProgress);
         }
+        LevelFlow.inst.flushBattleRewards();
         this.refreshHud();
     }
 
@@ -439,9 +462,13 @@ export class GameEntry extends Component {
             const carry = s2.carrySource !== 'none';
             const lo = s2.loadout;
 
-            lines.push('Lv.' + lo.level + '　武器 ' + lo.weapons.length + '/' + weaponSlotCap(carry) +
-                '　辅助 ' + lo.auxes.length + '/' + auxSlotCap(carry) +
-                (lo.pendingExp > 0 ? '　经验 ' + Math.floor(lo.pendingExp) : ''));
+            const expNeed = levelExpFor(lo.level);
+            const exp = Math.max(0, Math.floor(lo.pendingExp));
+            const expText = lo.level >= MAX_RUN_LEVEL
+                ? '经验已满'
+                : '经验 ' + exp + '/' + expNeed + ' ' + this.expBar(exp / Math.max(1, expNeed));
+            lines.push('Lv.' + lo.level + '　' + expText + '　武器 ' + lo.weapons.length + '/' + weaponSlotCap(carry) +
+                '　辅助 ' + lo.auxes.length + '/' + auxSlotCap(carry));
 
             for (const st of lo.weapons) {
                 lines.push('　· ' + this.slotLine(st));
@@ -472,10 +499,33 @@ export class GameEntry extends Component {
      */
     private slotLine(st: EquipRunState): string {
         const desc = EquipmentManager.describeSlot(st);
+        if (st.kind === 'weapon') {
+            const state = LevelFlow.inst.current;
+            const ready = state && readyEvolutions(state.loadout, state.carrySource !== 'none')
+                .some(m => m.kind === 'weapon' && state.loadout.weapons[m.slotIndex] === st);
+            return desc + (ready ? '　★可进化' : '');
+        }
         const need = expToEvolve(st);
         if (need < 0) return desc + '　已至当前上限';
         if (need === 0) return desc + '　★可进化';
         return desc + '　再 ' + need + ' 经验进化';
+    }
+
+    private expBar(progress: number): string {
+        const width = 8;
+        const filled = Math.round(Math.max(0, Math.min(1, progress)) * width);
+        return '[' + '■'.repeat(filled) + '·'.repeat(width - filled) + ']';
+    }
+
+    private positionPanelCloseButtons(): void {
+        const panels = [
+            this.difficultyPanel, this.equipPanel, this.treePanel,
+            this.achievementPanel, this.forgePanel, this.gachaPanel,
+        ];
+        for (const panel of panels) {
+            const close = panel?.getChildByName('closeBtn');
+            close?.setPosition(250, 560, 0);
+        }
     }
 
     /** 天赋层数汇总，如"狂暴 ×3 · 疾风 ×1" */
@@ -500,11 +550,18 @@ export class GameEntry extends Component {
 
     /** 打开局外装备面板 */
     public openEquipPanel(): void {
+        this.closeInfoPanels();
         this.equipPanel?.getComponent(EquipPanel)?.show();
+    }
+
+    public openGachaPanel(): void {
+        this.closeInfoPanels();
+        this.gachaPanel?.getComponent(GachaPanel)?.open('weapon');
     }
 
     /** 打开进化图鉴（"哪些武器可以合成"就靠它回答） */
     public openTreePanel(): void {
+        this.closeInfoPanels();
         if (!this.isMainMenuPhase(LevelFlow.inst.phase)) {
             this.showToast('战斗中无法查看图鉴');
             return;
@@ -514,6 +571,7 @@ export class GameEntry extends Component {
 
     /** 打开成就面板 */
     public openAchievementPanel(): void {
+        this.closeInfoPanels();
         if (!this.isMainMenuPhase(LevelFlow.inst.phase)) {
             this.showToast('战斗中无法查看成就');
             return;
@@ -528,6 +586,7 @@ export class GameEntry extends Component {
      * 广告加速只挂在结算页，这是一个可选入口而不是必经流程。
      */
     public openForgePanel(): void {
+        this.closeInfoPanels();
         if (!this.isMainMenuPhase(LevelFlow.inst.phase)) {
             this.showToast('战斗中无法锻造');
             return;
@@ -537,9 +596,11 @@ export class GameEntry extends Component {
 
     /** 关闭图鉴 / 成就 / 锻造 */
     public closeInfoPanels(): void {
+        if (this.equipPanel) this.equipPanel.active = false;
         this.treePanel?.getComponent(TreePanel)?.close();
         this.achievementPanel?.getComponent(AchievementPanel)?.close();
         this.forgePanel?.getComponent(ForgePanel)?.close();
+        this.gachaPanel?.getComponent(GachaPanel)?.close();
     }
 
     // ------------------------------------------------------------ 调试入口（上线前删掉）
